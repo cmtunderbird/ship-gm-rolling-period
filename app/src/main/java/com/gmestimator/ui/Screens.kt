@@ -178,8 +178,9 @@ private fun MeasureScreen(vm: MainViewModel, onDone: () -> Unit) {
                             "Calm water. Start the ship rolling (rudder cycling, weight shift, wash), then " +
                                 "let her roll freely. This gives the true NATURAL period plus the roll damping. 3 min."
                         else
-                            "Rolling in a seaway. Needs a long record (20 min+) and only works when the roll is " +
-                                "resonant; in a regular swell the ship rolls at the ENCOUNTER period, which is not GM.",
+                            "Rolling in a seaway. A ship rolls at whatever period the WAVES push her at, which " +
+                                "is usually not her own. The app checks the accelerometer and will refuse the " +
+                                "record if the roll peak turns out to be a wave. Expect to be refused often.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -337,7 +338,6 @@ private fun ResultScreen(vm: MainViewModel) {
                 }
             }
         } else if (r.period.isNaN()) {
-            // The record was rejected outright — say why, rather than blaming the ship's dimensions.
             Card(
                 Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Bad.copy(alpha = 0.10f))
@@ -350,6 +350,8 @@ private fun ResultScreen(vm: MainViewModel) {
         } else {
             Text("Ship particulars incomplete — period measured, but GM cannot be computed.", color = Warn)
         }
+
+        SeaCard(vm, r)
 
         RollPlot(r)
         SpectrumPlot(r)
@@ -427,6 +429,100 @@ private fun ResultScreen(vm: MainViewModel) {
     }
 }
 
+/**
+ * What the sea was doing — and whether the "roll" we measured was actually the ship at all.
+ *
+ * A swell is an INPUT: it appears in the roll AND in the accelerometer.
+ * A resonance is the SHIP: it appears ONLY in the roll.
+ */
+@Composable
+private fun SeaCard(vm: MainViewModel, r: PeriodEstimator.Result) {
+    val sea = r.sea
+    val enc = vm.encounter
+
+    Card(
+        Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = when {
+                sea?.seaLocked == true -> Bad.copy(alpha = 0.10f)
+                sea != null -> Good.copy(alpha = 0.08f)
+                else -> MaterialTheme.colorScheme.surfaceVariant
+            }
+        )
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("The sea", fontWeight = FontWeight.Bold)
+
+            if (sea == null) {
+                Text(
+                    "No heave signal — the sea could not be checked. Without the accelerometer " +
+                        "there is no way to tell whether the roll peak is the ship or a wave.",
+                    style = MaterialTheme.typography.bodySmall, color = Warn
+                )
+            } else {
+                Mono("Dominant wave period   ${"%.1f".format(sea.wavePeakPeriod)} s")
+                Mono("Vertical accel (RMS)   ${"%.2f".format(sea.rmsVerticalAcc)} m/s²")
+                Mono("Indicative Hs          ${"%.1f".format(sea.indicativeHs)} m   (rough)")
+                Mono("Wave energy at the roll peak: ${"%.1f".format(sea.excessAtRollPeakDb)} dB")
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    sea.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (sea.seaLocked) Bad else Good,
+                    fontWeight = if (sea.seaLocked) FontWeight.Bold else FontWeight.Normal
+                )
+                if (sea.seaLocked) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "A ship rolls at whatever period the waves push her at. Only when she is " +
+                            "left to roll FREELY does she roll at her own. Do a free-decay test in " +
+                            "sheltered water.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+            Text("Encounter test", fontWeight = FontWeight.Bold)
+            Text(
+                "Waves shift with heading and speed. Your ship's natural period does not. " +
+                    "Record twice on different headings — the period that stays put is the ship.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Mono("This record: ${vm.gps.summary()}")
+
+            if (vm.history.size >= 2) {
+                Spacer(Modifier.height(4.dp))
+                vm.history.forEach { h ->
+                    Mono(
+                        "${h.label}  T = ${"%.2f".format(h.period)} s   " +
+                            if (h.cogDeg.isNaN()) "(no COG)"
+                            else "SOG ${"%.1f".format(h.sogKn)} kn  COG ${"%.0f".format(h.cogDeg)}°"
+                    )
+                }
+            }
+            if (enc != null) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    enc.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (enc.conclusive) Good else Warn,
+                    fontWeight = FontWeight.Medium
+                )
+            } else if (vm.history.size < 2) {
+                Text(
+                    "Take a second record on a course at least 30° away to run this test.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            if (vm.history.isNotEmpty()) {
+                TextButton(onClick = { vm.clearHistory() }) { Text("Clear record history") }
+            }
+        }
+    }
+}
+
 @Composable
 private fun RollPlot(r: PeriodEstimator.Result) {
     Column {
@@ -489,7 +585,6 @@ private fun SpectrumPlot(r: PeriodEstimator.Result) {
                     if (k == lo) path.moveTo(x, y) else path.lineTo(x, y)
                 }
                 drawPath(path, Color(0xFF6A1B9A), style = androidx.compose.ui.graphics.drawscope.Stroke(2f))
-                // marker at the adopted period
                 val fPeak = 1.0 / r.period
                 val kPeak = f.indexOfFirst { it >= fPeak }
                 if (kPeak in lo..hi) {
@@ -604,7 +699,6 @@ private fun NumField(label: String, value: Double, onChange: (Double) -> Unit) {
     // back into the profile, which returns as a new `value`; keying on it would rebuild the
     // buffer on every keystroke ("12.5" -> "1.02...") and make a decimal point impossible to
     // type, because "." parses to null -> 0.0 -> key changes -> buffer resets to "".
-    // The text field owns its own buffer; the parsed value only flows outward.
     var text by remember { mutableStateOf(if (value == 0.0) "" else value.toString()) }
     OutlinedTextField(
         value = text,
