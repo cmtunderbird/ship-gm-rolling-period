@@ -9,10 +9,11 @@ import kotlin.math.atan2
 import kotlin.math.sqrt
 
 /**
- * Turns the phone's IMU into a ship roll-angle recorder.
+ * Turns the phone's IMU into a ship roll-angle recorder - and, since the sea-lock work, into a
+ * crude wave recorder as well.
  *
  * ------------------------------------------------------------------------------------------
- * WHY WE DO NOT USE THE ACCELEROMETER ALONE
+ * WHY WE DO NOT USE THE ACCELEROMETER ALONE (for the ROLL ANGLE)
  * ------------------------------------------------------------------------------------------
  * The obvious approach - tilt angle from the gravity vector - is wrong on a ship. The
  * accelerometer measures (gravity - acceleration). A phone lying anywhere off the roll axis
@@ -27,15 +28,19 @@ import kotlin.math.sqrt
  * the ship, and it is immune to linear acceleration. Its only weakness is slow bias drift -
  * which is out of the roll band and is exactly what the accelerometer is good at fixing.
  *
- * So: gyro in the roll band (0.02-0.35 Hz), accelerometer only below it, for the DC reference.
- * That is what TYPE_GAME_ROTATION_VECTOR already does internally, and it deliberately excludes
- * the magnetometer - important, because a steel ship's magnetic field is useless.
- *
  * Source priority:
  *   1. TYPE_GAME_ROTATION_VECTOR  (gyro + accel, no compass)     <- preferred
  *   2. TYPE_ROTATION_VECTOR       (gyro + accel + compass)
  *   3. complementary filter over TYPE_GYROSCOPE + TYPE_ACCELEROMETER (manual fallback)
  *   4. TYPE_ACCELEROMETER only    (degraded - flagged to the user)
+ *
+ * ------------------------------------------------------------------------------------------
+ * ...BUT THE ACCELEROMETER IS INDISPENSABLE FOR THE HEAVE
+ * ------------------------------------------------------------------------------------------
+ * The vertical acceleration is our only witness to what the SEA is doing, and without it the
+ * instrument cannot tell the ship's own resonance from a wave driving her at some other
+ * period. See SeaAnalyzer. So the accelerometer is now registered in EVERY mode, not just the
+ * fallbacks.
  *
  * ------------------------------------------------------------------------------------------
  * THE MOUNTING PROBLEM
@@ -73,6 +78,7 @@ class RollRecorder(context: Context) : SensorEventListener {
         const val FS = 25.0
         private const val SAMPLE_US = 20_000        // request 50 Hz from the sensor
         private const val RAD2DEG = 57.29577951308232
+        private const val GRAVITY = 9.80665
     }
 
     private val sm = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -85,6 +91,21 @@ class RollRecorder(context: Context) : SensorEventListener {
     private val tRaw = ArrayList<Double>(200_000)
     private val xRaw = ArrayList<Double>(200_000)   // tilt about the phone's Y axis [deg]
     private val yRaw = ArrayList<Double>(200_000)   // tilt about the phone's X axis [deg]
+
+    /**
+     * WORLD-VERTICAL linear acceleration [m/s2], gravity removed. This is the ship's heave
+     * acceleration - and in deep water it IS the wave-slope spectrum, up to a factor of g^2
+     * (see SeaAnalyzer). It is how we tell the sea apart from the ship, and until now we were
+     * recording the accelerometer and throwing this away.
+     */
+    private val tAz = ArrayList<Double>(200_000)
+    private val azRaw = ArrayList<Double>(200_000)
+
+    /** Latest world-"up" direction expressed in the device frame (third row of R). */
+    private var upX = 0.0
+    private var upY = 0.0
+    private var upZ = 1.0
+    private var haveUp = false
 
     private var t0Nanos = 0L
     private var recording = false
@@ -114,6 +135,8 @@ class RollRecorder(context: Context) : SensorEventListener {
     fun start() {
         stop()
         tRaw.clear(); xRaw.clear(); yRaw.clear()
+        tAz.clear(); azRaw.clear()
+        haveUp = false
         cfX = Double.NaN; cfY = Double.NaN
         lastGyroNanos = 0L
         t0Nanos = 0L
@@ -124,14 +147,14 @@ class RollRecorder(context: Context) : SensorEventListener {
                 reg(Sensor.TYPE_GAME_ROTATION_VECTOR)
             Source.ROTATION_VECTOR ->
                 reg(Sensor.TYPE_ROTATION_VECTOR)
-            Source.GYRO_ACCEL -> {
-                reg(Sensor.TYPE_ACCELEROMETER)
+            Source.GYRO_ACCEL ->
                 reg(Sensor.TYPE_GYROSCOPE)
-            }
-            Source.ACCEL_ONLY ->
-                reg(Sensor.TYPE_ACCELEROMETER)
+            Source.ACCEL_ONLY -> Unit
             Source.NONE -> return
         }
+        // The accelerometer is now registered in EVERY mode, not just the fallbacks. We need it
+        // for the heave signal - it is our only witness to what the sea is doing.
+        reg(Sensor.TYPE_ACCELEROMETER)
         recording = true
     }
 
@@ -165,6 +188,7 @@ class RollRecorder(context: Context) : SensorEventListener {
                 val gx = rotMat[6].toDouble()
                 val gy = rotMat[7].toDouble()
                 val gz = rotMat[8].toDouble()
+                upX = gx; upY = gy; upZ = gz; haveUp = true
                 push(t, tiltFromGravity(gx, gy, gz))
             }
 
@@ -176,6 +200,23 @@ class RollRecorder(context: Context) : SensorEventListener {
                 val tilt = tiltFromGravity(ax / n, ay / n, az / n)
                 accX = tilt.first
                 accY = tilt.second
+
+                // World-vertical LINEAR acceleration = (specific force . up) - g.
+                // Android's accelerometer reports specific force, gravity included: at rest it
+                // reads +9.81 along whatever axis points up. Project onto the world "up" direction
+                // and subtract g; what is left is the ship's HEAVE acceleration - the only witness
+                // we have to what the sea is doing. See SeaAnalyzer.
+                // If attitude is not available yet, use the accelerometer's own direction, which
+                // for a phone lying flat on a deck is a perfectly good estimate of "up".
+                val ux: Double; val uy: Double; val uz: Double
+                if (haveUp) {
+                    ux = upX; uy = upY; uz = upZ
+                } else {
+                    ux = ax / n; uy = ay / n; uz = az / n
+                }
+                tAz.add(t)
+                azRaw.add(ax * ux + ay * uy + az * uz - GRAVITY)
+
                 if (source == Source.ACCEL_ONLY) push(t, tilt)
             }
 
@@ -291,7 +332,33 @@ class RollRecorder(context: Context) : SensorEventListener {
         )
     }
 
-    /** Raw uniform tilt channels, for CSV export / offline re-analysis. */
+    /**
+     * The heave (world-vertical) acceleration, resampled onto the same uniform grid as the roll.
+     * This is the sea's signature. Detrended, so any residual gravity offset does not matter.
+     */
+    fun buildHeaveSeries(): DoubleArray? {
+        val n = tAz.size
+        if (n < 100) return null
+        val dur = tAz[n - 1] - tAz[0]
+        if (dur < 10.0) return null
+        val m = (dur * FS).toInt()
+        val out = DoubleArray(m)
+        var j = 0
+        for (i in 0 until m) {
+            val t = tAz[0] + i / FS
+            while (j < n - 2 && tAz[j + 1] < t) j++
+            val t0 = tAz[j]; val t1 = tAz[j + 1]
+            val w = if (t1 > t0) ((t - t0) / (t1 - t0)).coerceIn(0.0, 1.0) else 0.0
+            out[i] = azRaw[j] + w * (azRaw[j + 1] - azRaw[j])
+        }
+        return Dsp.detrend(out)
+    }
+
+    /** Raw tilt channels, for CSV export / offline re-analysis. */
     fun rawSamples(): Triple<DoubleArray, DoubleArray, DoubleArray> =
         Triple(tRaw.toDoubleArray(), xRaw.toDoubleArray(), yRaw.toDoubleArray())
+
+    /** Raw heave-acceleration channel, for CSV export. */
+    fun rawHeave(): Pair<DoubleArray, DoubleArray> =
+        Pair(tAz.toDoubleArray(), azRaw.toDoubleArray())
 }

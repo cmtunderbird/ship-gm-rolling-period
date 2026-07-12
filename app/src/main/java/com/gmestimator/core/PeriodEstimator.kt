@@ -14,10 +14,13 @@ import kotlin.math.sqrt
  *                  the same thing a mate does with a stopwatch, but with interpolated crossing
  *                  instants and a median over every cycle in the record.
  *
- * Their AGREEMENT is the primary quality indicator. If the two methods disagree by more than a
- * few percent the record is not a clean single-frequency roll (confused sea, two swell systems,
- * ship rolling at the wave encounter period rather than her own, phone sliding, etc.) and the
- * result should not be trusted.
+ * Their AGREEMENT is the primary quality indicator.
+ *
+ * BUT AGREEMENT IS NOT ENOUGH. Both methods measure the period the ship is ROLLING at. Neither
+ * has any way of knowing whether that is the ship's OWN period or simply the period the waves
+ * are pushing her at - and in a seaway those are usually different. Two methods that agree
+ * perfectly on the wrong number are still wrong. That is what the sea-lock veto is for: it asks
+ * the accelerometer whether the peak belongs to the sea. See SeaAnalyzer.
  */
 object PeriodEstimator {
 
@@ -51,6 +54,8 @@ object PeriodEstimator {
         val zeta: Double,               // roll damping ratio (FREE_DECAY only, else NaN)
         val competingPeriod: Double,    // s, second roll period present in the record (NaN if none)
         val competingRatio: Double,     // its power relative to the primary peak
+        /** What the sea was doing, from the accelerometer. Null if no heave signal was supplied. */
+        val sea: SeaAnalyzer.SeaState?,
         val quality: Quality,
 
         val phi: DoubleArray,           // band-passed roll angle actually analysed [deg]
@@ -77,11 +82,18 @@ object PeriodEstimator {
         val maxCompetingRatio: Double = 0.25
     )
 
+    /**
+     * @param heave world-vertical acceleration [m/s2] on the SAME uniform grid as phiRaw.
+     *              Optional for FREE_DECAY. MANDATORY in practice for SEAWAY: without it we are
+     *              blind to the sea, and the roll peak may simply be the wave period. See
+     *              SeaAnalyzer for the failure this prevents.
+     */
     fun estimate(
         phiRaw: DoubleArray,
         fs: Double,
         mode: Mode,
         axisDominance: Double,
+        heave: DoubleArray? = null,
         cfg: Config = Config()
     ): Result {
         val fLo = 1.0 / cfg.tMax
@@ -102,10 +114,23 @@ object PeriodEstimator {
         val tPsd = 1.0 / peak.freq
 
         // Is there a SECOND roll period in this record? If so, one of the two is the sea, and the
-        // spectrum cannot tell us which. See Dsp.secondaryPeak for why this matters so much.
+        // spectrum cannot tell us which. See Dsp.secondaryPeak.
         val competing = Dsp.secondaryPeak(psd, fLo, fHi)
         val tCompeting = competing?.let { 1.0 / it.first } ?: Double.NaN
         val rCompeting = competing?.second ?: 0.0
+
+        // ---- 1b. ASK THE SEA -------------------------------------------------------------
+        // Does the roll peak have a twin in the accelerometer? If it does, this is a wave, and
+        // nothing about this record says anything about GM. This is the ONLY check that can
+        // catch a ship rolling at the wave period in a clean, single-peaked wind sea - the
+        // competing-peak gate is blind to it, because there is nothing to compete with.
+        val sea: SeaAnalyzer.SeaState? = heave?.let { h ->
+            if (h.size < detr.size / 2) null
+            else {
+                val psdAz = Dsp.welchPsd(Dsp.detrend(h), fs, segLen, overlap = 0.5, padFactor = 4)
+                SeaAnalyzer.analyse(psd, psdAz, peak.freq, fLo, fHi)
+            }
+        }
 
         // ---- 2. time-domain estimate ----------------------------------------------------
         val bp = Dsp.bandpassFft(detr, fs, fLo, fHi)
@@ -145,13 +170,9 @@ object PeriodEstimator {
         val tMean = 0.5 * (tPsd + tZc)
         val agreement = abs(tPsd - tZc) / tMean
 
-        // consistency: does the spectral peak recur in independent sub-windows?
         val consistency = subWindowConsistency(detr, fs, segLen, fLo, fHi, peak.freq)
 
-        // adopted period: in a free decay we trust the decay fit; otherwise the two-method mean,
-        // weighted by their individual precision.
         val seZc = if (cycles.nCycles > 1) cycles.sdPeriod / sqrt(cycles.nCycles.toDouble()) else tZc * 0.1
-        // spectral precision ~ half-power width, improved by the number of averaged segments
         val sePsd = (peak.halfPowerWidth / (2.0 * sqrt(psd.nSegments.toDouble().coerceAtLeast(1.0)))) *
             tPsd * tPsd   // df -> dT via dT = df / f^2 = df * T^2
 
@@ -164,7 +185,6 @@ object PeriodEstimator {
             adopted = (wZc * tZc + wPsd * tPsd) / (wZc + wPsd)
         }
 
-        // uncertainty: statistical precision, but never smaller than half the method disagreement
         val uStat = 1.0 / sqrt(1.0 / (seZc * seZc).coerceAtLeast(1e-9) + 1.0 / (sePsd * sePsd).coerceAtLeast(1e-9))
         val uPeriod = maxOf(uStat, 0.5 * abs(tPsd - tZc))
 
@@ -173,6 +193,21 @@ object PeriodEstimator {
 
         // ---- 5. quality gates --------------------------------------------------------------
         val problems = ArrayList<String>()
+
+        // THE SEA-LOCK VETO. Highest priority: if the accelerometer says this peak is a wave,
+        // nothing else matters. In a seaway this is the check that stops the instrument from
+        // confidently reporting the wave period as the ship's, which in a plain wind sea makes
+        // a tender ship look 3.5x stiffer than she really is.
+        if (mode == Mode.SEAWAY && sea != null && sea.seaLocked) {
+            problems.add(sea.message)
+        }
+        if (mode == Mode.SEAWAY && sea == null) {
+            problems.add(
+                "no heave signal, so the sea could not be checked. In a seaway the roll peak may " +
+                    "simply be the wave period, and there is no way to tell without the accelerometer"
+            )
+        }
+
         if (rCompeting > cfg.maxCompetingRatio) {
             problems.add(
                 "TWO roll periods are present (${fmt(tPsd)} s and ${fmt(tCompeting)} s). One of them is " +
@@ -221,6 +256,7 @@ object PeriodEstimator {
             zeta = zeta,
             competingPeriod = tCompeting,
             competingRatio = rCompeting,
+            sea = sea,
             quality = quality,
             phi = core,
             fs = fs,
@@ -231,8 +267,6 @@ object PeriodEstimator {
 
     /**
      * Split the record into independent windows and check that the same peak keeps coming back.
-     * A ship in a regular swell rolls at the ENCOUNTER period, not at her own natural period;
-     * that peak wanders as heading/speed/sea state change, whereas a resonant response does not.
      */
     private fun subWindowConsistency(
         x: DoubleArray,
@@ -265,7 +299,7 @@ object PeriodEstimator {
         periodSpectral = Double.NaN, periodZeroCross = Double.NaN, agreement = Double.NaN,
         nCycles = 0, meanAmplitude = 0.0, maxAmplitude = 0.0, prominence = 0.0,
         axisDominance = 0.0, consistency = 0.0, zeta = Double.NaN,
-        competingPeriod = Double.NaN, competingRatio = 0.0, quality = Quality.POOR,
+        competingPeriod = Double.NaN, competingRatio = 0.0, sea = null, quality = Quality.POOR,
         phi = DoubleArray(0), fs = fs, psdFreq = DoubleArray(0), psdPower = DoubleArray(0)
     )
 
