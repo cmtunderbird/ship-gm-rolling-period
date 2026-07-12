@@ -1,10 +1,12 @@
 package com.gmestimator
 
+import android.Manifest
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -18,8 +20,19 @@ class MainActivity : ComponentActivity() {
 
     private val vm: MainViewModel by viewModels()
 
+    private val locationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* optional */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Location is OPTIONAL and used for exactly one thing: the encounter test. A wave's
+        // period shifts with heading and speed; a ship's natural roll period does not. Two
+        // records on different headings therefore separate the ship from the sea with no
+        // modelling assumptions at all. If the user declines, everything else still works.
+        if (!vm.gps.hasPermission()) {
+            locationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
 
         // Android throttles or stops sensor delivery to a backgrounded app. A roll record is
         // 3-20 minutes long, so the screen must stay on for the whole run. The alternative

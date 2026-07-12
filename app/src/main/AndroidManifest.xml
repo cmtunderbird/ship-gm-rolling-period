@@ -6,6 +6,13 @@
     <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />
     <uses-feature android:name="android.hardware.sensor.accelerometer" android:required="true" />
 
+    <!-- Speed and course over ground, used ONLY for the encounter test: a wave's period shifts
+         with heading and speed, a ship's natural roll period does not. Two records on different
+         headings therefore separate the ship from the sea, with no modelling assumptions at all.
+         The app works without it; it just cannot offer that test. Nothing is transmitted. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
