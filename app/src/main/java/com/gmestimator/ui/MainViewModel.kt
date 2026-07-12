@@ -7,13 +7,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import com.gmestimator.core.GmModel
+import com.gmestimator.core.GpsTrack
 import com.gmestimator.core.PeriodEstimator
 import com.gmestimator.core.RollRecorder
+import com.gmestimator.core.SeaAnalyzer
 import com.gmestimator.data.CalPoint
 import com.gmestimator.data.ProfileStore
 import com.gmestimator.data.ShipProfile
 import com.gmestimator.export.Exporter
 import java.io.File
+import kotlin.math.abs
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -24,6 +27,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val store = ProfileStore(app)
     val recorder = RollRecorder(app)
+    val gps = GpsTrack(app)
+
+    /** Completed records this session, kept so we can run the encounter test across them. */
+    val history = mutableStateListOf<SeaAnalyzer.RecordSummary>()
+    var encounter by mutableStateOf<SeaAnalyzer.EncounterVerdict?>(null)
+        private set
 
     var profile by mutableStateOf(store.load())
         private set
@@ -77,16 +86,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         recorder.start()
+        gps.start()                    // for the encounter test; harmless if permission is denied
         recording = true
     }
 
     fun stopAndAnalyse() {
         recorder.stop()
+        gps.stop()
         recording = false
         val s = recorder.buildRollSeries() ?: return
         series = s
-        val r = PeriodEstimator.estimate(s.phi, s.fs, mode, s.axisDominance)
+
+        // The heave signal is what lets the estimator ask the sea whether the roll peak is even
+        // the ship's. Without it, SEAWAY mode is flying blind.
+        val heave = recorder.buildHeaveSeries()
+        val r = PeriodEstimator.estimate(s.phi, s.fs, mode, s.axisDominance, heave)
         result = r
+
+        // Log the record so a second one, on a different heading, can be compared against it.
+        if (!r.period.isNaN()) {
+            history.add(
+                SeaAnalyzer.RecordSummary(
+                    label = "#${history.size + 1}",
+                    period = r.period,
+                    sogKn = gps.sogKnots(),
+                    cogDeg = gps.cogDeg()
+                )
+            )
+            encounter = runEncounterCheck()
+        }
+
         if (!r.period.isNaN() && profile.isValid()) {
             gm = GmModel.evaluate(
                 period = r.period,
@@ -110,7 +139,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             )
             fSource = GmModel.FSource.CALIBRATED
         }
-        // recompute with the new f
         gm = GmModel.evaluate(
             r.period, r.periodUncertainty, profile.effectiveF(),
             profile.fUncertainty(), profile.beam, profile.fSource
@@ -119,6 +147,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun removeCalibration(index: Int) = updateProfile {
         if (index in calibrations.indices) calibrations.removeAt(index)
+    }
+
+    /**
+     * Find the two records in this session taken on the most different headings, and ask whether
+     * the period held. A wave-driven peak moves with heading; the ship's does not.
+     */
+    private fun runEncounterCheck(): SeaAnalyzer.EncounterVerdict? {
+        val usable = history.filter { !it.cogDeg.isNaN() && !it.sogKn.isNaN() }
+        if (usable.size < 2) return null
+        var best: Pair<SeaAnalyzer.RecordSummary, SeaAnalyzer.RecordSummary>? = null
+        var bestSpread = -1.0
+        for (i in usable.indices) for (j in i + 1 until usable.size) {
+            var d = abs(usable[i].cogDeg - usable[j].cogDeg) % 360.0
+            if (d > 180.0) d = 360.0 - d
+            val spread = d + 10.0 * abs(usable[i].sogKn - usable[j].sogKn)
+            if (spread > bestSpread) {
+                bestSpread = spread
+                best = usable[i] to usable[j]
+            }
+        }
+        return best?.let { SeaAnalyzer.encounterCheck(it.first, it.second) }
+    }
+
+    fun clearHistory() {
+        history.clear()
+        encounter = null
     }
 
     fun exportRecord() {
@@ -136,6 +190,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         recorder.stop()
+        gps.stop()
         super.onCleared()
     }
 }
