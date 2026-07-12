@@ -31,7 +31,7 @@ object Exporter {
     /**
      * Writes two files:
      *   *_raw.csv     every sensor sample (irregular timing preserved) - for offline re-analysis
-     *   *_report.txt  the measurement record: inputs, both period estimates, quality, GM
+     *   *_report.txt  the measurement record: inputs, both period estimates, the sea, quality, GM
      */
     fun export(
         context: Context,
@@ -108,6 +108,24 @@ object Exporter {
             appendLine("  Competing period            T = ${f2(r.competingPeriod)} s at ${f1(r.competingRatio * 100)} % of primary power")
         }
         if (!r.zeta.isNaN()) appendLine("  Roll damping ratio zeta       ${f3(r.zeta)}")
+        appendLine()
+        appendLine("THE SEA  (from the vertical accelerometer)")
+        val sea = r.sea
+        if (sea == null) {
+            appendLine("  NOT CHECKED - no heave signal. In a seaway the roll peak may simply be the")
+            appendLine("  wave period, and without the accelerometer there is no way to tell.")
+        } else {
+            appendLine("  Dominant wave period         ${f2(sea.wavePeakPeriod)} s")
+            appendLine("  Vertical acceleration (RMS)  ${f2(sea.rmsVerticalAcc)} m/s2")
+            appendLine("  Indicative Hs                ${f1(sea.indicativeHs)} m   (rough - see docs)")
+            appendLine("  Wave energy at the roll peak ${f1(sea.excessAtRollPeakDb)} dB above background")
+            appendLine(
+                "  SEA-LOCK                     " +
+                    if (sea.seaLocked) "YES - THIS IS A WAVE, NOT THE SHIP"
+                    else "no - the roll peak is the ship's own"
+            )
+        }
+        appendLine()
         appendLine("  ADOPTED                     T = ${f2(r.period)} +/- ${f2(r.periodUncertainty)} s")
         appendLine("  Roll amplitude              mean ${f2(r.meanAmplitude)} deg, max ${f2(r.maxAmplitude)} deg")
         appendLine("  Quality                     ${r.quality}  - ${r.message}")
