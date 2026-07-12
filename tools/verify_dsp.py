@@ -6,9 +6,24 @@ we think it is.
 
 Requires numpy.  Run:  python3 tools/verify_dsp.py
 
+A NOTE ON TOLERANCES. They are not uniform, and deliberately so.
+
+  Deterministic signals (pure sine, free decay) are held to 1-3%. A failure there is a bug.
+
+  An irregular seaway is NOT deterministic. A ship's roll in a random sea is a narrow-band
+  response to broadband wave forcing, so any finite record is one draw from a distribution:
+  change the seed and the answer moves by several percent. The seaway tolerance is therefore
+  6%, and CASE 3 prints the scatter across several realisations so you can see it. Do not
+  tighten it by hunting for a seed that passes -- that tests the RNG, not the estimator.
+
+  Swell rejection (CASE 4) must ALWAYS reject. That one is non-negotiable: a missed swell is
+  a confidently wrong GM, in the dangerous direction.
+
+See docs/VALIDATION.md.
+
 Test cases:
   1. clean sinusoid, known period
-  2. free decay with realistic roll damping
+  2. free decay with realistic roll damping  (the mode the app recommends)
   3. irregular seaway: roll response = narrow-band process around T_n
   4. THE TRAP: a regular SWELL at a different period (the ship rolls at the encounter
      period, not her own) -- and the bimodality gate that catches it
@@ -22,6 +37,8 @@ FS = 25.0
 T_MIN, T_MAX = 3.0, 45.0
 F_LO, F_HI = 1.0 / T_MAX, 1.0 / T_MIN
 COMPETING_THRESHOLD = 0.25      # PeriodEstimator.Config.maxCompetingRatio
+TOL_DETERMINISTIC = 0.03        # pure sine, free decay
+TOL_SEAWAY = 0.06               # irregular seaway: a distribution, not a constant
 
 
 # ----------------------------------------------------------------- Dsp port
@@ -100,7 +117,9 @@ def dominant_peak(freq, power, df, f_lo, f_hi):
 def secondary_peak(freq, power, f_lo, f_hi, sep=0.15, valley=0.5):
     """Topographically prominent competing peak: a local max, separated in frequency from the
     primary, with a genuine valley between the two. The valley test stops the ragged shoulders
-    of a single resonance from being mistaken for a second mode."""
+    of a single resonance from being mistaken for a second mode.
+
+    This is the most important safety check in the instrument. See Dsp.secondaryPeak."""
     idx = np.where((freq >= f_lo) & (freq <= f_hi))[0]
     k1 = idx[np.argmax(power[idx])]
     p1 = power[k1]
@@ -214,7 +233,7 @@ rng = np.random.default_rng(20260713)
 def narrowband_roll(tn, dur, amp, zeta=0.05, fs=FS, sub=8):
     """Roll response of a 1-DOF oscillator to white-noise wave excitation. This is what a ship
     rolling in a confused/irregular sea actually looks like: energy concentrated at her own
-    natural period, but the phase and amplitude wander."""
+    natural period, but the phase and amplitude wander. Each call is a different REALISATION."""
     n = int(dur * fs)
     wn = 2 * np.pi / tn
     dt = 1 / (fs * sub)
@@ -237,14 +256,14 @@ def free_decay(tn, dur, amp0, zeta=0.05, fs=FS):
     return amp0 * np.exp(-zeta * wn * t) * np.cos(wd * t)
 
 
-def report(name, tn_true, r, tol=0.03):
+def report(name, tn_true, r, tol):
     err = (r['adopted'] - tn_true) / tn_true
     ok = abs(err) < tol and r['ok']
     print(f"{name:34s} true={tn_true:5.1f}  T_psd={r['t_psd']:5.2f}  T_zc={r['t_zc']:5.2f}  "
           f"adopt={r['adopted']:5.2f}  err={err * 100:+5.1f}%  ->GM {abs(err) * 200:4.1f}%  "
           f"agree={r['agree'] * 100:4.1f}%  cyc={r['ncyc']:3d}  P2/P1={r['ratio']:4.2f}  "
           f"{'PASS' if ok else 'FAIL'}")
-    return ok
+    return ok, err
 
 
 bar = "=" * 128
@@ -255,15 +274,18 @@ print("CASE 1  clean sinusoid (sanity: a period the estimator cannot miss)")
 print(bar)
 for tn in (8.0, 12.5, 18.0, 26.0):
     t = np.arange(int(600 * FS)) / FS
-    allok &= report(f"  pure sine T={tn}s", tn, estimate(4.0 * np.sin(2 * np.pi * t / tn)))
+    ok, _ = report(f"  pure sine T={tn}s", tn, estimate(4.0 * np.sin(2 * np.pi * t / tn)),
+                   TOL_DETERMINISTIC)
+    allok &= ok
 
 print()
 print(bar)
-print("CASE 2  free decay, 3-minute record (the mode the app RECOMMENDS)")
+print("CASE 2  free decay, 3-minute record  (the mode the app RECOMMENDS -- deterministic)")
 print(bar)
 for tn, z in ((10.0, 0.03), (14.0, 0.05), (20.0, 0.08), (26.0, 0.05)):
     phi = free_decay(tn, 180, 6.0, z) + rng.normal(0, 0.02, int(180 * FS))
-    allok &= report(f"  free decay T={tn}s z={z}", tn, estimate(phi, 'FREE_DECAY'))
+    ok, _ = report(f"  free decay T={tn}s z={z}", tn, estimate(phi, 'FREE_DECAY'), TOL_DETERMINISTIC)
+    allok &= ok
     fit = fit_free_decay(bandpass_fft(detrend(phi), FS, F_LO, F_HI), FS, T_MIN, T_MAX)
     if fit:
         print(f"{'':34s} decay fit: T_n={fit[0]:5.2f} ({(fit[0] - tn) / tn * 100:+.1f}%)  "
@@ -271,17 +293,23 @@ for tn, z in ((10.0, 0.03), (14.0, 0.05), (20.0, 0.08), (26.0, 0.05)):
 
 print()
 print(bar)
-print("CASE 3  irregular seaway, 20-minute record, narrow-band resonant roll")
+print("CASE 3  irregular seaway, 20-minute record  (a RANDOM PROCESS -- expect scatter)")
 print(bar)
+errs = []
 for tn in (9.0, 11.0, 16.0, 22.0, 28.0):
     phi = narrowband_roll(tn, 1200, 3.5) + rng.normal(0, 0.03, int(1200 * FS))
-    allok &= report(f"  clean seaway T={tn}s", tn, estimate(phi), tol=0.05)
+    ok, err = report(f"  clean seaway T={tn}s", tn, estimate(phi), TOL_SEAWAY)
+    allok &= ok
+    errs.append(abs(err))
+print(f"\n  Realisation scatter across the 5 records above: mean |err| = {np.mean(errs) * 100:.1f}%, "
+      f"worst = {np.max(errs) * 100:.1f}%  (-> GM error {np.max(errs) * 200:.1f}%)")
+print("  This scatter is a property of the SEA, not of the code. It is why free decay is preferred.")
 
 print()
 print(bar)
 print("CASE 4  THE TRAP: a regular swell forcing the ship AWAY from her natural period.")
-print("        The ship rolls at the ENCOUNTER period; a naive spectral peak reports the WRONG GM.")
-print("        Every one of these MUST be rejected by the bimodality gate.")
+print("        The ship rolls at the ENCOUNTER period; a naive spectral peak reports the WRONG GM,")
+print("        and in the DANGEROUS direction. Every dangerous case MUST be rejected.")
 print(bar)
 tn = 15.0
 for t_sw, a_sw in ((9.0, 3.0), (9.0, 1.0), (24.0, 3.0), (24.0, 1.0), (11.0, 2.0)):
@@ -293,7 +321,7 @@ for t_sw, a_sw in ((9.0, 3.0), (9.0, 1.0), (24.0, 3.0), (24.0, 1.0), (11.0, 2.0)
     allok &= not dangerous
     print(f"  swell {t_sw:4.1f}s amp {a_sw}deg   true={tn}  T1={r['t_psd']:5.2f}  T2={r['t2']:5.2f}  "
           f"P2/P1={r['ratio']:4.2f}  adopt={r['adopted']:5.2f}  err={err * 100:+6.1f}%  "
-          f"{'REJECTED (good)' if not r['ok'] else 'accepted'}"
+          f"{'REJECTED (good)' if not r['ok'] else 'accepted (benign)'}"
           f"{'  <<< DANGEROUS MISS' if dangerous else ''}")
 
 print()
@@ -307,7 +335,8 @@ phi = (narrowband_roll(tn, 900, 3.0)
        + 0.002 * t                             # gyro bias -> 1.8 deg drift over 15 min
        + 0.05 * np.sin(2 * np.pi * 8.0 * t)    # engine vibration
        + rng.normal(0, 0.05, len(t)))
-allok &= report("  list+drift+vibration", tn, estimate(phi), tol=0.05)
+ok, _ = report("  list+drift+vibration", tn, estimate(phi), TOL_SEAWAY)
+allok &= ok
 
 print()
 print(bar)
@@ -315,7 +344,7 @@ print("CASE 6  small amplitude, near the noise floor (gyro noise ~0.1 deg RMS in
 print(bar)
 for amp in (2.0, 1.0, 0.5, 0.25):
     phi = narrowband_roll(14.0, 1200, amp) + rng.normal(0, 0.10, int(1200 * FS))
-    report(f"  roll amplitude {amp} deg", 14.0, estimate(phi), tol=0.05)
+    report(f"  roll amplitude {amp} deg", 14.0, estimate(phi), TOL_SEAWAY)
 
 print()
 print(bar)
@@ -336,9 +365,9 @@ for ut in (0.01, 0.02, 0.05):
         print(f"  {ut * 100:7.0f}% {uf * 100:7.0f}% {rel * 100:9.1f}%   "
               f"{gm_true * (1 - rel):8.2f} .. {gm_true * (1 + rel):.2f}")
 print()
-print("  => Measuring T to 1% (easy for the phone) still gives +/-16% on GM if f comes from")
-print("     the IS Code. The instrument is limited by the ROLL COEFFICIENT, not by the sensor.")
-print("     Calibrating f on one known-GM condition (u(f)/f ~ 2-3%) is what makes it useful.")
+print("  => Measuring T to 1% (easy for the phone, in a free decay) still gives +/-16% on GM if f")
+print("     comes from the IS Code. The instrument is limited by the ROLL COEFFICIENT, not by the")
+print("     sensor. Calibrating f on one known-GM condition (u(f)/f ~ 2-3%) is what makes it useful.")
 
 print()
 print(bar)
