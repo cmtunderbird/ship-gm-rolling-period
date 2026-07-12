@@ -112,7 +112,7 @@ Validated margins on synthetic records:
 
 | record type | competing-peak ratio |
 |---|---|
-| clean resonant roll (irregular sea) | **0.00 – 0.04** |
+| clean resonant roll (irregular sea) | **0.00 – 0.06** |
 | free decay | **0.00** |
 | swell-contaminated | **0.30 – 0.79** |
 
@@ -129,13 +129,23 @@ The 0.25 threshold sits in a wide, empty gap between the two populations.
 | case | result |
 |---|---|
 | Pure sinusoid, T = 8 … 26 s | error **< 0.1 %** |
-| Free decay, ζ = 0.03 … 0.08, 3-min record | T error **< 0.8 %**, ζ recovered to **±0.001** |
-| Irregular seaway, 20-min record | T error **< 3 %** |
+| **Free decay**, ζ = 0.03 … 0.08, 3-min record | T error **< 1 %**, ζ recovered to **±0.001** |
+| **Irregular seaway**, 20-min record | T error typically **1–3 %**, up to **~5 %** on a single realisation |
 | Static list 4.5° + gyro drift + 8 Hz engine vibration | T error **< 1 %** |
 | Roll amplitude down to 0.25° (at the noise floor) | T error **< 3.5 %** |
-| Swell-contaminated seaway | **rejected**, no dangerous misses |
-| Clean seaway, T = 9 … 28 s | **accepted**, no false rejections |
+| Swell-contaminated seaway | **rejected** — no dangerous misses |
+| Clean seaway, T = 9 … 28 s | **accepted** — no false rejections |
 | Principal-axis solver, phone at 5 headings | roll axis recovered to **> 0.99** dot product |
+
+### A ship rolling in a seaway is a random process
+
+An earlier version of this table claimed "seaway error < 3 %". Re-running the identical harness on a different random realisation produced **5.2 %** at T = 9 s — which, doubled, is a **10 % error in GM**. Nothing had changed but the seed: the 3 % figure was one lucky draw reported as if it were a bound.
+
+That is not a bug. A ship's roll in an irregular sea is a narrow-band *random* response to broadband wave forcing, so any finite record gives one sample from a distribution. It is a genuine, irreducible limitation of measuring GM in a seaway — and it is a large part of why **free decay is the recommended mode**. Free decay is deterministic; the seaway is not.
+
+If you must work from a seaway record, take several on different headings. **The spread is the uncertainty.**
+
+Full discussion, including why the test tolerances are what they are: **[docs/VALIDATION.md](docs/VALIDATION.md)**.
 
 Reproduce with:
 
@@ -165,7 +175,7 @@ Example ship, B = 32.2 m, d = 11.0 m, Lwl = 190 m, true GM = 1.20 m (→ T ≈ 2
 
 ### The phone is not the limiting factor. The roll coefficient is.
 
-The IMU measures the period to ~1 %. The IS Code roll coefficient carries ~8 % scatter — and published validation (Grin, IMDC 2024) shows the JSRA fit adopted by IS 2008 is the **worst performing** of the eight common estimators, with errors of several seconds on large ships.
+The IMU measures the period to ~1 % in a free decay. The IS Code roll coefficient carries ~8 % scatter — and published validation (Grin, IMDC 2024) shows the JSRA fit adopted by IS 2008 is the **worst performing** of the eight common estimators, with errors of several seconds on large ships.
 
 ### Which is why calibration is the whole point
 
@@ -229,7 +239,7 @@ The rolling-period method assumes small-amplitude, lightly damped, **free** roll
 5. Record ≥ 3 minutes. Do not touch the phone. Do not switch away from the app (Android throttles sensors for backgrounded apps; the screen is held on for this reason).
 6. **Stop & analyse.**
 
-**Seaway (rolling at sea, ~20 min):** same, but select **Seaway** and expect the app to reject the record if a swell is present. If it does, change heading and re-measure.
+**Seaway (rolling at sea, ~20 min):** same, but select **Seaway** and expect the app to reject the record if a swell is present. If it does, change heading and re-measure. Take several records and treat their spread as the uncertainty.
 
 **Then calibrate.** The first time you get a GOOD or EXCELLENT record in a condition whose GM you trust, go to the **Calibrate** tab and enter that GM. This is the step that turns the app from a novelty into an instrument.
 
@@ -268,8 +278,8 @@ app/src/main/java/com/gmestimator/
 app/src/test/java/com/gmestimator/
   DspTest.kt               acceptance tests, incl. the swell-rejection case
 
-tools/
-  verify_dsp.py            Python port of the algorithm; reproduces every number above
+docs/VALIDATION.md         what the accuracy numbers mean, and what they do not
+tools/verify_dsp.py        Python port of the algorithm; reproduces every number above
 ```
 
 ---
@@ -279,6 +289,7 @@ tools/
 - [ ] Validate against a real ship with a known GM (the single most important open item)
 - [ ] Support alternative roll-coefficient estimators (Doyère, JSRA-without-length, beam method) — all of which outperform the IS Code fit in published validation
 - [ ] Log a calibration curve of f against draught, rather than a single mean
+- [ ] Average several seaway records automatically and report the spread as the uncertainty
 - [ ] Optional foreground service so the screen can be turned off during long seaway records
 - [ ] Import/export ship profiles between devices
 
