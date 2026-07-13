@@ -201,8 +201,16 @@ object Exporter {
             appendLine("  Dominant wave period         ${f2(sea.wavePeakPeriod)} s")
             appendLine("  Vertical acceleration (RMS)  ${f2(sea.rmsVerticalAcc)} m/s2")
             appendLine("  Indicative Hs                ${f1(sea.indicativeHs)} m   (rough)")
-            appendLine("  Phone lever arm from roll axis ${f1(sea.leverArmM)} m  (fitted; its own")
-            appendLine("     roll-induced heave has been removed before the check below)")
+            if (sea.leverArmM.isNaN()) {
+                appendLine("  Phone lever arm  NOT FITTED - she was rolling too little for the")
+                appendLine("     regression to mean anything. The heave has been left untouched,")
+                appendLine("     which is the safe choice: a lever arm fitted to noise would inject")
+                appendLine("     scaled roll noise into the one channel that is meant to be an")
+                appendLine("     INDEPENDENT witness of the sea.")
+            } else {
+                appendLine("  Phone lever arm from roll axis ${f1(sea.leverArmM)} m  (fitted; its own")
+                appendLine("     roll-induced heave has been removed before the check below)")
+            }
             appendLine("  Wave energy at the roll peak ${f1(sea.excessAtRollPeakDb)} dB above background")
             if (mode == PeriodEstimator.Mode.SEAWAY) {
                 appendLine(

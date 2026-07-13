@@ -294,12 +294,33 @@ object SeaAnalyzer {
         var num = 0.0
         var den = 0.0
         for (i in 0 until n) { num += heave[i] * dd[i]; den += dd[i] * dd[i] }
-        if (den < 1e-12) return Pair(heave, 0.0)
+        if (den < 1e-12) return Pair(heave, Double.NaN)
         val lever = num / den                       // metres
+
+        // DOES THE FIT ACTUALLY EXPLAIN ANYTHING?
+        //
+        // The 19:17 record fitted a lever arm of -0.2 m. The 19:54 record, 37 minutes later,
+        // fitted +3.1 m. The phone did not move. What changed is that she was barely rolling
+        // (0.46 deg) - and a least-squares fit ALWAYS returns a number, even when it is
+        // regressing one noise signal onto another. It has no way of telling you that the
+        // number means nothing.
+        //
+        // So ask it. If phi_ddot explains less than a few percent of the heave, there is no
+        // lever-arm signal to remove, and subtracting `lever * phi_ddot` would be injecting
+        // scaled roll noise INTO the very channel we use as an independent witness of the sea.
+        // Leave the heave alone and report the lever arm as unknown.
+        var hh = 0.0
+        for (i in 0 until n) hh += heave[i] * heave[i]
+        val r2 = if (hh < 1e-12) 0.0 else (num * num) / (den * hh)   // fraction of heave explained
+
+        if (r2 < MIN_LEVER_R2) return Pair(heave, Double.NaN)
 
         val out = DoubleArray(n) { heave[it] - lever * dd[it] }
         return Pair(out, lever)
     }
+
+    /** Below this, the lever-arm regression is fitting noise, not geometry. */
+    private const val MIN_LEVER_R2 = 0.02
 
     // ============================================================================================
     // THE ENCOUNTER TEST - the one that needs no model at all
