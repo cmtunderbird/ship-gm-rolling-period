@@ -86,7 +86,18 @@ data class ShipProfile(
         put("manualF", manualF)
         put("seaHs", seaHs); put("seaTp", seaTp); put("seaFrom", seaFrom)
         put("swellHs", swellHs); put("swellTp", swellTp); put("swellFrom", swellFrom)
-        put("manualSogKn", manualSogKn); put("manualCogDeg", manualCogDeg)
+        // THE CRASH.
+        //
+        // org.json.JSONObject.put(String, double) THROWS JSONException("Forbidden numeric value:
+        // NaN") on a NaN. manualSogKn and manualCogDeg are NaN until the operator types something.
+        // So: flip the "always use my figures" switch with the fields still empty -> updateProfile
+        // -> store.save() -> toJson() -> put(NaN) -> throw -> the app dies in his hand.
+        //
+        // Toggling a switch must never be able to kill the app. Omit the key instead; fromJson
+        // already defaults a missing key back to NaN, which is exactly the right meaning:
+        // "he has not entered this".
+        if (!manualSogKn.isNaN()) put("manualSogKn", manualSogKn)
+        if (!manualCogDeg.isNaN()) put("manualCogDeg", manualCogDeg)
         put("forceManualNav", forceManualNav)
         put("calibrations", JSONArray().apply {
             calibrations.forEach { c ->
@@ -154,6 +165,9 @@ class ProfileStore(context: Context) {
     }
 
     fun save(p: ShipProfile) {
-        prefs.edit().putString("profile", p.toJson().toString()).apply()
+        // Serialising the ship's particulars is not worth crashing over. The NaN bug above is
+        // fixed at source; this is the second line of defence, so that no future field can ever
+        // take the whole instrument down while a man is standing on a bridge trying to use it.
+        runCatching { prefs.edit().putString("profile", p.toJson().toString()).apply() }
     }
 }

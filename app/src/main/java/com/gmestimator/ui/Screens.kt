@@ -343,7 +343,12 @@ private fun MeasureScreen(vm: MainViewModel, onDone: () -> Unit) {
         HorizontalDivider()
         // The operator must be able to SEE whether the phone has a fix before he commits to a
         // twenty-minute record - not find out afterwards that the speed was never known.
-        val liveNav = vm.liveNav()
+        var navTick by remember { mutableStateOf(0) }
+        LaunchedEffect(Unit) {
+            vm.startGps()
+            while (true) { kotlinx.coroutines.delay(1000); navTick++ }
+        }
+        val liveNav = remember(navTick) { vm.liveNav() }
         val navOk = liveNav.source != NavSource.UNKNOWN
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -1010,8 +1015,20 @@ private fun NumField(label: String, value: Double, onChange: (Double) -> Unit) {
 @Composable
 private fun NavPanel(vm: MainViewModel) {
     val p = vm.profile
-    val gpsNav = vm.gps.nav()
-    val nav = vm.resolveNav()
+
+    // Poll the receiver so the display actually MOVES while he watches it. A static "NO FIX"
+    // that never updates is indistinguishable from a broken app - which is precisely how this
+    // looked from the bridge.
+    var tick by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        vm.startGps()
+        while (true) {
+            kotlinx.coroutines.delay(1000)
+            tick++
+        }
+    }
+    val gpsNav = remember(tick) { vm.gps.liveNav() }
+    val nav = remember(tick, p.forceManualNav, p.manualSogKn, p.manualCogDeg) { vm.resolveNav() }
 
     Text("Speed and course", style = MaterialTheme.typography.titleMedium)
 
@@ -1026,6 +1043,10 @@ private fun NavPanel(vm: MainViewModel) {
                 )
                 Spacer(Modifier.width(8.dp))
                 Mono("${gpsNav.fixes} fixes")
+                if (!vm.gps.hasPermission()) {
+                    Spacer(Modifier.width(8.dp))
+                    Text("NO PERMISSION", color = Bad, style = MaterialTheme.typography.bodySmall)
+                }
             }
             if (gpsOk) {
                 Mono(

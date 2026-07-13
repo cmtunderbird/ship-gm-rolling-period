@@ -30,6 +30,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val recorder = RollRecorder(app)
     val gps = GpsTrack(app)
 
+    init {
+        // Ask for a fix the moment the app opens. The old code only ever called
+        // requestLocationUpdates() from startRecording(), so the receiver was not even running
+        // when the operator was looking at the "GPS: NO FIX" line and wondering why.
+        gps.startListening()
+    }
+
     /** Completed records this session, kept so we can run the encounter test across them. */
     val history = mutableStateListOf<SeaAnalyzer.RecordSummary>()
     var encounter by mutableStateOf<SeaAnalyzer.EncounterVerdict?>(null)
@@ -65,7 +72,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     /** Live, before and during a record: is the receiver actually seeing anything? */
-    fun liveNav(): Nav = if (profile.forceManualNav) resolveNav() else gps.nav()
+    fun liveNav(): Nav = if (profile.forceManualNav) resolveNav() else gps.liveNav()
+
+    /** Start the receiver NOW, not when a record begins. The old code only ever asked for a fix
+     *  while recording, which is why the Sea tab could never show one. */
+    fun startGps() = gps.startListening()
 
     val sensorSource: RollRecorder.Source get() = recorder.availableSource()
 
@@ -100,13 +111,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         recorder.start()
-        gps.start()                    // for the encounter test; harmless if permission is denied
+        gps.beginRecord()              // marks a window in a stream that is ALREADY flowing
         recording = true
     }
 
     fun stopAndAnalyse() {
         recorder.stop()
-        gps.stop()
+        gps.endRecord()                // stop accumulating - but KEEP the receiver listening
         recording = false
         val s = recorder.buildRollSeries() ?: return
         series = s
@@ -155,7 +166,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * - the operator's own figures off the bridge. If neither: UNKNOWN, said out loud.
      */
     fun resolveNav(): Nav = Nav.resolve(
-        gps = gps.nav(),
+        gps = gps.nav(),          // GpsTrack.nav() itself falls back to the live fix if the
+                                  // record window came up short
         forceManual = profile.forceManualNav,
         manualSog = profile.manualSogKn,
         manualCog = profile.manualCogDeg
@@ -245,7 +257,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         recorder.stop()
-        gps.stop()
+        gps.stopListening()
         super.onCleared()
     }
 }
