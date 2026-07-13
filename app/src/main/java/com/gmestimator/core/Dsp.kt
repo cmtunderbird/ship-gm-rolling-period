@@ -120,8 +120,11 @@ object Dsp {
         }
         if (inverse) {
             for (i in 0 until n) {
-                re[i] /= n
-                im[i] /= n
+                // NOTE: `re[i] /= n` does NOT compile. Kotlin will not desugar an augmented
+                // assignment on an array element into a set() call here - it reports
+                // "No set method providing array access". Write the division out.
+                re[i] = re[i] / n
+                im[i] = im[i] / n
             }
         }
     }
@@ -129,12 +132,12 @@ object Dsp {
     // ---------------------------------------------------------------- filtering
 
     /**
-     * Zero-phase band-pass by FFT masking. The record is detrended and zero-padded to the
-     * next power of two; bins outside [fLo, fHi] are zeroed and the signal transformed back.
+     * Zero-phase band-pass by FFT masking. The record is detrended and zero-padded to the next
+     * power of two; bins outside [fLo, fHi] are zeroed and the signal transformed back.
      *
      * Zero-padding causes ringing near the record ends. The caller MUST discard an edge guard
-     * at each end before doing any time-domain (zero-crossing) analysis. See
-     * PeriodEstimator.estimate, which scales that guard to the MEASURED period.
+     * at each end before any time-domain (zero-crossing) analysis. See PeriodEstimator.estimate,
+     * which scales that guard to the MEASURED period.
      */
     fun bandpassFft(x: DoubleArray, fs: Double, fLo: Double, fHi: Double): DoubleArray {
         val n = x.size
@@ -173,11 +176,9 @@ object Dsp {
     /**
      * Welch power spectral density estimate.
      *
-     * @param segLen   segment length in samples (power of two)
-     * @param overlap  fractional overlap, e.g. 0.5
-     * @param padFactor zero-pad each windowed segment by this factor before the FFT. This does
-     *                  not add information but gives a finer bin grid, which makes the parabolic
-     *                  peak interpolation better conditioned.
+     * @param padFactor zero-pad each windowed segment by this factor before the FFT. Adds no
+     *                  information, but gives a finer bin grid, which makes the parabolic peak
+     *                  interpolation better conditioned.
      */
     fun welchPsd(
         x: DoubleArray,
@@ -220,7 +221,7 @@ object Dsp {
             start += step
         }
         if (segs == 0) return Psd(DoubleArray(0), DoubleArray(0), fs / nfft, 0)
-        for (k in 0 until nBins) acc[k] /= segs
+        for (k in 0 until nBins) acc[k] = acc[k] / segs      // see the note in fft(): not /=
         val df = fs / nfft
         val freq = DoubleArray(nBins) { it * df }
         return Psd(freq, acc, df, segs)
@@ -230,10 +231,10 @@ object Dsp {
         val freq: Double,          // Hz, sub-bin interpolated
         val power: Double,
         val prominence: Double,    // peak power / median power in band
-        val halfPowerWidth: Double // Hz, -3 dB width; a proxy for how sharp the resonance is
+        val halfPowerWidth: Double // Hz, -3 dB width
     )
 
-    /** Locate the dominant peak of `psd` inside [fLo, fHi] with parabolic (log-domain) interpolation. */
+    /** Dominant peak of `psd` inside [fLo, fHi], with parabolic (log-domain) interpolation. */
     fun dominantPeak(psd: Psd, fLo: Double, fHi: Double): SpectralPeak? {
         if (psd.freq.isEmpty()) return null
         val lo = psd.freq.indexOfFirst { it >= fLo }.let { if (it < 0) return null else it }
@@ -244,7 +245,6 @@ object Dsp {
         for (k in lo..hi) if (psd.power[k] > psd.power[kMax]) kMax = k
         if (kMax <= 0 || kMax >= psd.power.size - 1) return null
 
-        // parabolic interpolation on ln(P) -> sub-bin peak location
         val y0 = ln(maxOf(psd.power[kMax - 1], 1e-30))
         val y1 = ln(maxOf(psd.power[kMax], 1e-30))
         val y2 = ln(maxOf(psd.power[kMax + 1], 1e-30))
@@ -256,7 +256,6 @@ object Dsp {
         val med = median(band)
         val prominence = if (med <= 0.0) Double.MAX_VALUE else psd.power[kMax] / med
 
-        // -3 dB width around the peak
         val half = psd.power[kMax] / 2.0
         var kl = kMax
         while (kl > lo && psd.power[kl] > half) kl--
@@ -271,17 +270,13 @@ object Dsp {
      * Strongest COMPETING peak in the band: a topographically prominent local maximum, separated
      * in frequency from the primary, with a genuine valley between the two.
      *
-     * This is the single most important safety check in the whole instrument. A ship in a regular
-     * swell rolls at the WAVE ENCOUNTER period, not at her own natural period. If you feed that
-     * peak into GM = (fB/T)^2 you get a confidently wrong answer - and in the dangerous direction,
-     * because a long swell makes the ship look tender when she is not. Whenever a second peak
-     * carries more than ~25% of the primary's power the record is ambiguous and must be rejected:
-     * one of the two peaks is the sea, and the spectrum alone cannot tell you which.
+     * A ship in a regular swell rolls at the WAVE ENCOUNTER period, not her own. Feed that peak
+     * into GM = (fB/T)^2 and you get a confidently wrong answer, in the dangerous direction:
+     * a long swell makes a stiff ship look tender. Whenever a second peak carries more than ~25%
+     * of the primary's power, one of the two IS THE SEA, and the spectrum alone cannot say which.
      *
-     * The "valley" test is what stops the ragged shoulders of a single resonance peak from being
-     * mistaken for a second mode.
-     *
-     * @return (frequency, powerRatio) of the competing peak, or null if the record is unimodal.
+     * The "valley" test stops the ragged shoulders of a single resonance from being mistaken for
+     * a second mode.
      */
     fun secondaryPeak(
         psd: Psd,
@@ -329,9 +324,9 @@ object Dsp {
 
     /**
      * Classic roll-test period measurement: time between successive UPWARD zero crossings of the
-     * band-passed roll angle. A hysteresis band (+/- `hyst` deg) must be traversed between
-     * crossings, which rejects the multiple spurious crossings that noise produces near zero.
-     * Crossing instants are linearly interpolated, giving sub-sample timing.
+     * band-passed roll angle. A hysteresis band must be traversed between crossings, which
+     * rejects the spurious crossings noise produces near zero. Crossing instants are linearly
+     * interpolated, giving sub-sample timing.
      */
     fun zeroCrossingCycles(
         phi: DoubleArray,
@@ -376,21 +371,19 @@ object Dsp {
         val zeta: Double,             // non-dimensional roll damping ratio
         val logDecrement: Double,
         val nExtrema: Int,
-        val r2: Double                // quality of the exponential-decay fit
+        val r2: Double
     )
 
     /**
      * Fit an exponentially decaying sinusoid to a free-decay (roll test) record.
-     * Uses successive extrema: |phi| at extrema should decay as exp(-zeta * omega_n * t).
+     * Uses successive extrema: |phi| should decay as exp(-zeta * omega_n * t).
      */
     fun fitFreeDecay(phi: DoubleArray, fs: Double, tMin: Double, tMax: Double): DecayFit? {
-        // locate local extrema
         data class Ext(val t: Double, val v: Double)
         val ext = ArrayList<Ext>()
         for (i in 1 until phi.size - 1) {
             val a = phi[i - 1]; val b = phi[i]; val c = phi[i + 1]
             if ((b > a && b >= c) || (b < a && b <= c)) {
-                // parabolic refinement of the extremum position and value
                 val denom = a - 2 * b + c
                 val d = if (abs(denom) < 1e-12) 0.0 else 0.5 * (a - c) / denom
                 val t = (i + d.coerceIn(-1.0, 1.0)) / fs
@@ -398,7 +391,6 @@ object Dsp {
                 ext.add(Ext(t, v))
             }
         }
-        // keep only alternating-sign extrema above a noise floor
         val noise = 0.05 * (phi.maxOrNull() ?: 0.0).coerceAtLeast(abs(phi.minOrNull() ?: 0.0))
         val used = ArrayList<Ext>()
         for (e in ext) {
@@ -411,13 +403,11 @@ object Dsp {
         }
         if (used.size < 5) return null
 
-        // half-periods between successive (alternating) extrema -> damped period
         val halves = ArrayList<Double>()
         for (k in 1 until used.size) halves.add(2.0 * (used[k].t - used[k - 1].t))
         val td = median(halves.toDoubleArray().filter { it in tMin..tMax }.toDoubleArray())
         if (td.isNaN()) return null
 
-        // log decrement from |extremum| vs half-cycle index (regression of ln|v| on index)
         val n = used.size
         val xs = DoubleArray(n) { it.toDouble() }
         val ys = DoubleArray(n) { ln(abs(used[it].v).coerceAtLeast(1e-6)) }
