@@ -5,6 +5,8 @@ import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
 import com.gmestimator.core.GmModel
+import com.gmestimator.core.Nav
+import com.gmestimator.core.NavSource
 import com.gmestimator.core.PeriodEstimator
 import com.gmestimator.core.RollRecorder
 import com.gmestimator.data.ShipProfile
@@ -42,8 +44,7 @@ object Exporter {
         mode: PeriodEstimator.Mode,
         raw: Triple<DoubleArray, DoubleArray, DoubleArray>,
         heave: Pair<DoubleArray, DoubleArray>,
-        sogKn: Double,
-        cogDeg: Double,
+        nav: Nav,
         note: String
     ): List<File> {
         val root = context.getExternalFilesDir(null) ?: context.filesDir
@@ -76,7 +77,7 @@ object Exporter {
         }
 
         val rep = File(dir, "${base}_report.txt")
-        rep.writeText(buildReport(profile, series, result, gm, mode, sogKn, cogDeg, note))
+        rep.writeText(buildReport(profile, series, result, gm, mode, nav, note))
 
         return listOf(rep, csv, hcsv)
     }
@@ -87,8 +88,7 @@ object Exporter {
         r: PeriodEstimator.Result,
         gm: GmModel.GmResult,
         mode: PeriodEstimator.Mode,
-        sogKn: Double,
-        cogDeg: Double,
+        nav: Nav,
         note: String
     ): String = buildString {
         val f0 = { v: Double -> n(v, 0) }
@@ -113,10 +113,31 @@ object Exporter {
         // roll floor that never decayed, I could not tell whether it was the sea or the
         // AUTOPILOT re-exciting her, because the record did not say how fast she was going.
         // Record the conditions you will later need to explain the result.
-        appendLine("  Speed over ground  ${if (sogKn.isNaN()) "not recorded" else f1(sogKn) + " kn"}")
-        appendLine("  Course over ground ${if (cogDeg.isNaN()) "not recorded" else f0(cogDeg) + " deg"}")
-        if (!sogKn.isNaN() && sogKn > 6.0 && mode == PeriodEstimator.Mode.FREE_DECAY) {
-            appendLine("  WARNING: a free decay at ${f1(sogKn)} kn is not free - autopilot rudder")
+        // AND WHERE THOSE FIGURES CAME FROM. A number in a report with no provenance is worse
+        // than no number: the reader assumes it was measured. If the GPS never got a fix and
+        // nobody typed anything in, this report says UNKNOWN, in capitals, and does not pretend.
+        appendLine("  Source             ${nav.label()}")
+        when (nav.source) {
+            NavSource.UNKNOWN -> {
+                appendLine("  Speed over ground  UNKNOWN")
+                appendLine("  Course over ground UNKNOWN")
+                appendLine("  ${nav.detail}.")
+                appendLine("  NOTE: an unknown speed is NOT a zero speed. Nothing in this report has")
+                appendLine("  been checked against her speed - including whether a free decay was")
+                appendLine("  taken slowly enough to be a free decay at all.")
+            }
+            else -> {
+                appendLine("  Speed over ground  ${f1(nav.sogKn)} kn")
+                appendLine(
+                    "  Course over ground " +
+                        (if (nav.courseKnown) f0(nav.cogDeg) + " deg" else "none (stopped or drifting)")
+                )
+                if (nav.detail.isNotBlank()) appendLine("  ${nav.detail}.")
+                if (!nav.steady) appendLine("  WARNING: course/speed NOT steady - every peak is smeared.")
+            }
+        }
+        if (nav.speedKnown && nav.sogKn > 6.0 && mode == PeriodEstimator.Mode.FREE_DECAY) {
+            appendLine("  WARNING: a free decay at ${f1(nav.sogKn)} kn is not free - autopilot rudder")
             appendLine("  corrections keep re-exciting her roll, speed adds lift damping, and forward")
             appendLine("  speed raises GM itself. The booklet GM is a ZERO-SPEED number.")
         }
@@ -201,6 +222,11 @@ object Exporter {
             appendLine("  Required GM (booklet) = ${f2(profile.minRequiredGm)} m  ->  $verdict")
         }
         appendLine()
+        if (r.caveats.isNotEmpty()) {
+            appendLine("WHAT I COULD NOT CHECK")
+            r.caveats.forEach { c -> appendLine("  * $c.") }
+            appendLine()
+        }
         appendLine("DISCLAIMER")
         appendLine("  Estimate only. The rolling-period method assumes small-amplitude, lightly damped,")
         appendLine("  free roll of a rigid ship in deep water with no significant free surface or")

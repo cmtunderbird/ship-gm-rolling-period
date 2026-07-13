@@ -20,6 +20,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.gmestimator.core.ForecastAdvisor
 import com.gmestimator.core.GmModel
+import com.gmestimator.core.Nav
+import com.gmestimator.core.NavSource
 import com.gmestimator.core.PeriodEstimator
 import com.gmestimator.core.RollRecorder
 import kotlin.math.abs
@@ -195,20 +197,23 @@ private fun SeaScreen(vm: MainViewModel) {
         NumField("From [° true]", p.swellFrom) { v -> vm.updateProfile { swellFrom = v } }
 
         HorizontalDivider()
+        NavPanel(vm)
+        HorizontalDivider()
 
         val systems = p.waveSystems()
-        val cog = vm.gps.cogDeg()
-        val sog = vm.gps.sogKnots()
+        val nav = vm.resolveNav()
+        val cog = nav.cogDeg
+        val sog = nav.sogKn
         val tn = vm.lastMeasuredPeriod().let { if (it.isNaN()) p.expectedPeriod() else it }
 
         if (systems.isEmpty()) {
             Text("Enter the forecast above and this fills in.", color = Warn)
             return@Column
         }
-        if (cog.isNaN()) {
+        if (!nav.courseKnown) {
             Text(
-                "No GPS course yet — the encounter periods need to know which way you are " +
-                    "pointing and how fast. Start a recording, or wait for a fix.",
+                "I do not know which way you are pointing — ${nav.detail}. The encounter periods " +
+                    "need a course and a speed. Enter them by hand above, or wait for a GPS fix.",
                 color = Warn, style = MaterialTheme.typography.bodySmall
             )
             return@Column
@@ -332,6 +337,29 @@ private fun MeasureScreen(vm: MainViewModel, onDone: () -> Unit) {
                 "No gyroscope found. Accelerometer-only tilt is corrupted by the ship's sway and " +
                     "by the roll's own centripetal acceleration, at the roll frequency. Results will be biased.",
                 color = Bad, style = MaterialTheme.typography.bodySmall
+            )
+        }
+
+        HorizontalDivider()
+        // The operator must be able to SEE whether the phone has a fix before he commits to a
+        // twenty-minute record - not find out afterwards that the speed was never known.
+        val liveNav = vm.liveNav()
+        val navOk = liveNav.source != NavSource.UNKNOWN
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (navOk) "Speed/course: OK" else "Speed/course: UNKNOWN",
+                color = if (navOk) Good else Bad,
+                fontWeight = FontWeight.Medium
+            )
+            Spacer(Modifier.width(8.dp))
+            Mono(liveNav.line())
+        }
+        if (!navOk) {
+            Text(
+                "No GPS fix and nothing entered by hand. I will still measure her period, but I " +
+                    "cannot check that a free decay was taken at low speed, and I cannot compute " +
+                    "the encounter period of the forecast waves. Enter SOG and COG on the Sea tab.",
+                color = Warn, style = MaterialTheme.typography.bodySmall
             )
         }
 
@@ -481,6 +509,22 @@ private fun ResultScreen(vm: MainViewModel) {
             PeriodEstimator.Quality.EXCELLENT, PeriodEstimator.Quality.GOOD -> Good
             PeriodEstimator.Quality.FAIR -> Warn
             PeriodEstimator.Quality.POOR -> Bad
+        }
+
+        // WHAT I COULD NOT CHECK. Shown ABOVE the number, not buried under it - a caveat the
+        // operator has to scroll to find is a caveat the instrument is hiding.
+        if (r.caveats.isNotEmpty()) {
+            Card(
+                Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Warn.copy(alpha = 0.14f))
+            ) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("What I could not check", fontWeight = FontWeight.Bold, color = Warn)
+                    r.caveats.forEach {
+                        Text("• $it.", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
         }
 
         if (g != null) {
@@ -658,8 +702,9 @@ private fun SeaCard(vm: MainViewModel, r: PeriodEstimator.Result) {
             // Does the forecast recognise this peak? If a forecast wave meets her at the same
             // period the roll peaked at, that peak is the sea. If no forecast wave lands
             // anywhere near it, that is real evidence it is the ship.
+            val rnav = r.nav
             val label = ForecastAdvisor.labelPeak(
-                r.period, vm.profile.waveSystems(), vm.gps.cogDeg(), vm.gps.sogKnots()
+                r.period, vm.profile.waveSystems(), rnav.cogDeg, rnav.sogKn
             )
             if (vm.profile.waveSystems().isNotEmpty()) {
                 Spacer(Modifier.height(4.dp))
@@ -683,7 +728,7 @@ private fun SeaCard(vm: MainViewModel, r: PeriodEstimator.Result) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Mono("This record: ${vm.gps.summary()}")
+            Mono("This record: ${r.nav.line()}")
 
             if (vm.history.size >= 2) {
                 Spacer(Modifier.height(4.dp))
@@ -898,6 +943,105 @@ private fun NumField(label: String, value: Double, onChange: (Double) -> Unit) {
         onValueChange = {
             text = it
             onChange(it.toDoubleOrNull() ?: 0.0)
+        },
+        label = { Text(label) },
+        singleLine = true,
+        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+        modifier = Modifier.fillMaxWidth()
+    )
+}
+
+/**
+ * SPEED AND COURSE: WHAT THE PHONE KNOWS, AND WHAT YOU CAN TELL IT.
+ *
+ * The Master's objection, and he was right: "I have no way to know if the GPS got a fix and it
+ * is really delivering the CoG and SoG to the system." An instrument that quietly uses a number
+ * you cannot see is an instrument you cannot trust. So this panel shows the fix state, live, and
+ * lets you overrule it with the figures off your own bridge.
+ */
+@Composable
+private fun NavPanel(vm: MainViewModel) {
+    val p = vm.profile
+    val gpsNav = vm.gps.nav()
+    val nav = vm.resolveNav()
+
+    Text("Speed and course", style = MaterialTheme.typography.titleMedium)
+
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            val gpsOk = gpsNav.source == NavSource.GPS
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (gpsOk) "GPS: FIX" else "GPS: NO FIX",
+                    color = if (gpsOk) Good else Bad,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.width(8.dp))
+                Mono("${gpsNav.fixes} fixes")
+            }
+            if (gpsOk) {
+                Mono(
+                    "SOG ${"%.1f".format(gpsNav.sogKn)} kn   " +
+                        (if (gpsNav.courseKnown) "COG ${"%.0f".format(gpsNav.cogDeg)}°" else "no course")
+                )
+                if (!gpsNav.steady) Text(
+                    "Course or speed not steady — every spectral peak is smeared by it.",
+                    color = Warn, style = MaterialTheme.typography.bodySmall
+                )
+            } else {
+                Text(
+                    gpsNav.detail.replaceFirstChar { it.uppercase() } + ".",
+                    color = Warn, style = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    "A phone inside a steel deckhouse usually cannot see the sky. That is normal. " +
+                        "Read the SOG and COG off the bridge and enter them below.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+    }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Switch(
+            checked = p.forceManualNav,
+            onCheckedChange = { v -> vm.updateProfile { forceManualNav = v } }
+        )
+        Spacer(Modifier.width(8.dp))
+        Text("Always use my figures (ignore the GPS)")
+    }
+
+    NanField("SOG [kn]", p.manualSogKn) { v -> vm.updateProfile { manualSogKn = v } }
+    NanField("COG [° true]", p.manualCogDeg) { v -> vm.updateProfile { manualCogDeg = v } }
+
+    // What will ACTUALLY be used for the next record. No guessing.
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp)) {
+            Text("The next record will use:", fontWeight = FontWeight.Bold)
+            Mono(nav.line())
+            if (nav.source == NavSource.UNKNOWN) {
+                Text(
+                    "UNKNOWN is not zero. With no speed I cannot confirm that a free decay was " +
+                        "taken slowly enough to BE a free decay, and I will say so on the result.",
+                    color = Bad, style = MaterialTheme.typography.bodySmall
+                )
+            } else if (nav.detail.isNotBlank()) {
+                Text(nav.detail + ".", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+/** Like NumField, but blank means NOT ENTERED (NaN) rather than zero. Zero knots is a real,
+ *  meaningful speed - "stopped" - and must not be confused with "he told me nothing". */
+@Composable
+private fun NanField(label: String, value: Double, onChange: (Double) -> Unit) {
+    var text by remember { mutableStateOf(if (value.isNaN()) "" else value.toString()) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = {
+            text = it
+            onChange(if (it.isBlank()) Double.NaN else (it.toDoubleOrNull() ?: Double.NaN))
         },
         label = { Text(label) },
         singleLine = true,

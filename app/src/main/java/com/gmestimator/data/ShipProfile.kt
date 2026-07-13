@@ -29,6 +29,15 @@ data class ShipProfile(
     // measurement window. It NEVER touches GM - see ForecastAdvisor.
     var seaHs: Double = 0.0, var seaTp: Double = 0.0, var seaFrom: Double = 0.0,
     var swellHs: Double = 0.0, var swellTp: Double = 0.0, var swellFrom: Double = 0.0,
+    // SPEED AND COURSE FALLBACK.
+    // A phone inside a steel deckhouse often never gets a fix, and the old code silently treated
+    // "I don't know the speed" as "the speed is zero" - which let a free decay at 14 kn through
+    // the gate. The Master can read SOG and COG off his own instruments in two seconds. These
+    // are those figures. NaN means he has not entered them.
+    var manualSogKn: Double = Double.NaN,
+    var manualCogDeg: Double = Double.NaN,
+    /** true = ignore the GPS entirely and use the figures above. */
+    var forceManualNav: Boolean = false,
     var calibrations: MutableList<CalPoint> = mutableListOf()
 ) {
 
@@ -77,6 +86,8 @@ data class ShipProfile(
         put("manualF", manualF)
         put("seaHs", seaHs); put("seaTp", seaTp); put("seaFrom", seaFrom)
         put("swellHs", swellHs); put("swellTp", swellTp); put("swellFrom", swellFrom)
+        put("manualSogKn", manualSogKn); put("manualCogDeg", manualCogDeg)
+        put("forceManualNav", forceManualNav)
         put("calibrations", JSONArray().apply {
             calibrations.forEach { c ->
                 put(JSONObject().apply {
@@ -118,6 +129,9 @@ data class ShipProfile(
                     GmModel.FSource.valueOf(o.optString("fSource", "IS_CODE"))
                 }.getOrDefault(GmModel.FSource.IS_CODE),
                 manualF = o.optDouble("manualF", 0.80),
+                manualSogKn = o.optDouble("manualSogKn", Double.NaN),
+                manualCogDeg = o.optDouble("manualCogDeg", Double.NaN),
+                forceManualNav = o.optBoolean("forceManualNav", false),
                 seaHs = o.optDouble("seaHs", 0.0),
                 seaTp = o.optDouble("seaTp", 0.0),
                 seaFrom = o.optDouble("seaFrom", 0.0),

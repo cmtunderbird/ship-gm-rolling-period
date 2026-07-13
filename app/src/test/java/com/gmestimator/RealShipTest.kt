@@ -2,6 +2,7 @@ package com.gmestimator
 
 import com.gmestimator.core.Dsp
 import com.gmestimator.core.ForecastAdvisor
+import com.gmestimator.core.Nav
 import com.gmestimator.core.PeriodEstimator
 import com.gmestimator.core.SeaAnalyzer
 import org.junit.Assert.assertEquals
@@ -155,8 +156,8 @@ class RealShipTest {
             val t = it / fs
             8.0 * exp(-z * wn * t) * cos(wn * sqrt(1 - z * z) * t) + 0.02 * gauss()
         }
-        val slow = PeriodEstimator.estimate(phi, fs, PeriodEstimator.Mode.FREE_DECAY, 0.99, null, 2.0)
-        val fast = PeriodEstimator.estimate(phi, fs, PeriodEstimator.Mode.FREE_DECAY, 0.99, null, 14.0)
+        val slow = PeriodEstimator.estimate(phi, fs, PeriodEstimator.Mode.FREE_DECAY, 0.99, null, Nav.manual(2.0, 90.0))
+        val fast = PeriodEstimator.estimate(phi, fs, PeriodEstimator.Mode.FREE_DECAY, 0.99, null, Nav.manual(14.0, 90.0))
 
         assertTrue("the same decay at 2 kn is fine: ${slow.message}", slow.ok)
         assertTrue("but at 14 kn it must be refused", !fast.ok)
@@ -184,7 +185,7 @@ class RealShipTest {
             val t = it / fs
             8.0 * exp(-z * wn * t) * cos(wd * t) + 0.02 * gauss()
         }
-        val r = PeriodEstimator.estimate(phi, fs, PeriodEstimator.Mode.FREE_DECAY, 0.99, null, 1.0)
+        val r = PeriodEstimator.estimate(phi, fs, PeriodEstimator.Mode.FREE_DECAY, 0.99, null, Nav.manual(1.0, 90.0))
         assertTrue("a clean decay must pass: ${r.message}", r.ok)
         assertEquals(tn, r.period, 0.05 * tn)
         assertTrue("and its cycles should be tight", r.periodScatter < 0.10)

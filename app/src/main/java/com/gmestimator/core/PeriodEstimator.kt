@@ -60,6 +60,10 @@ object PeriodEstimator {
         val resolutionLimit: Double,
         /** free decay only: initial roll amplitude / residual wave-driven roll. <3 = swamped. */
         val decayContrast: Double,
+        /** Things I could not verify. Not fatal - but never hidden. See the note at `caveats`. */
+        val caveats: List<String>,
+        /** Speed and course, and WHERE THEY CAME FROM. Never a bare NaN. */
+        val nav: Nav,
         /** What the sea was doing, from the accelerometer. Null if no heave signal was supplied. */
         val sea: SeaAnalyzer.SeaState?,
         val quality: Quality,
@@ -100,7 +104,7 @@ object PeriodEstimator {
         mode: Mode,
         axisDominance: Double,
         heave: DoubleArray? = null,
-        sogKn: Double = Double.NaN,
+        nav: Nav = Nav.UNKNOWN,
         cfg: Config = Config()
     ): Result {
         val fLo = 1.0 / cfg.tMax
@@ -244,6 +248,10 @@ object PeriodEstimator {
 
         // ---- 5. quality gates --------------------------------------------------------------
         val problems = ArrayList<String>()
+        // A CAVEAT is not a PROBLEM. A problem means the number is wrong and the record is
+        // rejected. A caveat means the number may be right but I could not check something I
+        // should have been able to check - and staying quiet about that is how instruments lie.
+        val caveats = ArrayList<String>()
 
         // THE SEA-LOCK VETO. Highest priority: if the accelerometer says this peak is a wave,
         // nothing else matters. In a seaway this is the check that stops the instrument from
@@ -307,11 +315,42 @@ object PeriodEstimator {
         //
         // Slowing down kills all four at once. It is the same conclusion the century-old roll
         // test reached: calm water, let her roll.
-        if (mode == Mode.FREE_DECAY && !sogKn.isNaN() && sogKn > 6.0) {
+        if (mode == Mode.FREE_DECAY && nav.speedKnown && nav.sogKn > 6.0) {
             problems.add(
-                "she was making ${fmt(sogKn)} kn. A free decay at speed is not free: the autopilot " +
+                "she was making ${fmt(nav.sogKn)} kn. A free decay at speed is not free: the autopilot " +
                     "re-excites her roll at every rudder correction, speed adds lift damping, and " +
                     "forward speed changes GM itself. Slow to under 3 kn, or stop"
+            )
+        }
+
+        // AND HERE IS THE CASE THAT USED TO PASS IN SILENCE.
+        //
+        // The old test was `if (!sogKn.isNaN() && sogKn > 6.0)`. With no GPS fix, sogKn is NaN,
+        // NaN is not greater than 6, and a free decay taken at fourteen knots went through the
+        // gate reported as EXCELLENT. Unknown speed was being treated as zero speed.
+        //
+        // A phone inside a steel deckhouse routinely has no fix. This was the normal case, not
+        // an exotic one. We cannot reject the record - she may genuinely be stopped - but we can
+        // refuse to pretend, and we can tell the operator exactly what to do about it: read the
+        // speed off the bridge and type it in.
+        if (mode == Mode.FREE_DECAY && !nav.speedKnown) {
+            caveats.add(
+                "I do not know how fast she was going - ${nav.detail}. A free decay is only valid " +
+                    "at low speed, and I cannot confirm that. Enter SOG and COG by hand on the Sea " +
+                    "tab, or take the record with a GPS fix"
+            )
+        }
+        if (mode == Mode.SEAWAY && !nav.courseKnown) {
+            caveats.add(
+                "no course over ground - ${nav.detail}. Without it I cannot compute the encounter " +
+                    "period of the forecast waves, so I cannot tell you whether the peak below is " +
+                    "her or the sea meeting her. Enter SOG and COG by hand on the Sea tab"
+            )
+        }
+        if (nav.speedKnown && !nav.steady) {
+            caveats.add(
+                "she was not holding a steady course or speed through this record. That smears the " +
+                    "encounter frequency across a range and broadens every peak in the spectrum"
             )
         }
         if (mode == Mode.FREE_DECAY && !contrast.isNaN() && contrast < 3.0) {
@@ -360,6 +399,8 @@ object PeriodEstimator {
             periodScatter = scatter,
             resolutionLimit = resolutionLimit,
             decayContrast = contrast,
+            caveats = caveats,
+            nav = nav,
             sea = sea,
             quality = quality,
             phi = core,
@@ -405,6 +446,7 @@ object PeriodEstimator {
         axisDominance = 0.0, consistency = 0.0, zeta = Double.NaN,
         competingPeriod = Double.NaN, competingRatio = 0.0,
         periodScatter = Double.NaN, resolutionLimit = Double.NaN, decayContrast = Double.NaN,
+        caveats = emptyList(), nav = Nav.UNKNOWN,
         sea = null, quality = Quality.POOR,
         phi = DoubleArray(0), fs = fs, psdFreq = DoubleArray(0), psdPower = DoubleArray(0)
     )

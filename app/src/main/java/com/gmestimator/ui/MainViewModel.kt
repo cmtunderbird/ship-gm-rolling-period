@@ -8,6 +8,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import com.gmestimator.core.GmModel
 import com.gmestimator.core.GpsTrack
+import com.gmestimator.core.Nav
 import com.gmestimator.core.PeriodEstimator
 import com.gmestimator.core.RollRecorder
 import com.gmestimator.core.SeaAnalyzer
@@ -59,6 +60,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var note by mutableStateOf("")
 
+    /** Speed and course for the record just taken, with its provenance. Never a bare NaN. */
+    var nav by mutableStateOf<Nav?>(null)
+        private set
+
+    /** Live, before and during a record: is the receiver actually seeing anything? */
+    fun liveNav(): Nav = if (profile.forceManualNav) resolveNav() else gps.nav()
+
     val sensorSource: RollRecorder.Source get() = recorder.availableSource()
 
     /**
@@ -106,7 +114,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // The heave signal is what lets the estimator ask the sea whether the roll peak is even
         // the ship's. Without it, SEAWAY mode is flying blind.
         val heave = recorder.buildHeaveSeries()
-        val r = PeriodEstimator.estimate(s.phi, s.fs, mode, s.axisDominance, heave, gps.sogKnots())
+
+        // ONE place decides what we know about her speed, and it is never allowed to answer
+        // "zero" when it means "no idea". See Nav.
+        val nav = resolveNav()
+        this.nav = nav
+        val r = PeriodEstimator.estimate(s.phi, s.fs, mode, s.axisDominance, heave, nav)
         result = r
 
         // Log the record so a second one, on a different heading, can be compared against it.
@@ -115,8 +128,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 SeaAnalyzer.RecordSummary(
                     label = "#${history.size + 1}",
                     period = r.period,
-                    sogKn = gps.sogKnots(),
-                    cogDeg = gps.cogDeg()
+                    sogKn = nav.sogKn,
+                    cogDeg = nav.cogDeg
                 )
             )
             encounter = runEncounterCheck()
@@ -131,8 +144,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 beam = profile.beam,
                 fSource = profile.fSource
             )
+            autoSave()          // a measurement the instrument does not keep is not a measurement
         }
     }
+
+    /**
+     * What we know about her speed and course, and where it came from.
+     *
+     * The GPS first. If it never saw the sky - which, in a steel deckhouse, is the usual outcome
+     * - the operator's own figures off the bridge. If neither: UNKNOWN, said out loud.
+     */
+    fun resolveNav(): Nav = Nav.resolve(
+        gps = gps.nav(),
+        forceManual = profile.forceManualNav,
+        manualSog = profile.manualSogKn,
+        manualCog = profile.manualCogDeg
+    )
 
     /** Turn the current measurement into a calibration point against a GM you already trust. */
     fun addCalibration(label: String, knownGm: Double) {
@@ -185,6 +212,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         encounter = null
     }
 
+    /**
+     * SAVE EVERY MEASUREMENT, ALWAYS.
+     *
+     * The 1.31 m record was analysed, shown, and then lost, because the file was only written if
+     * the operator remembered to press Export. A measurement an instrument does not keep is a
+     * measurement you cannot defend afterwards. Every completed analysis is now written to disk
+     * the moment it exists; Share is what the button does now, not Save.
+     */
+    private fun autoSave() {
+        try {
+            exportRecord()
+        } catch (_: Throwable) {
+            // never let a disk problem destroy a result the operator is looking at
+        }
+    }
+
     fun exportRecord() {
         val s = series ?: return
         val r = result ?: return
@@ -192,7 +235,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         lastFiles = Exporter.export(
             getApplication(), profile, s, r, g, mode,
             recorder.rawSamples(), recorder.rawHeave(),
-            gps.sogKnots(), gps.cogDeg(), note
+            nav ?: resolveNav(), note
         )
     }
 

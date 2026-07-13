@@ -129,6 +129,37 @@ class GpsTrack(private val context: Context) : LocationListener {
         return !c.isNaN() && !s.isNaN() && c < 10.0 && s < 1.0
     }
 
+    /**
+     * What the receiver actually knows, as a value the rest of the app can reason about.
+     *
+     * If it never got a fix this returns [Nav.UNKNOWN] - NOT a zero, and NOT a NaN dressed up as
+     * a number. The distinction is the entire point: see Nav.
+     */
+    fun nav(): Nav {
+        if (!available || fixCount() < Nav.MIN_FIXES) {
+            return Nav.UNKNOWN.copy(
+                fixes = fixCount(),
+                detail = when {
+                    !hasPermission() -> "location permission has not been granted to the app"
+                    !available -> "the GPS provider is switched off or unavailable"
+                    fixCount() == 0 -> "no fix - the phone probably cannot see the sky from here"
+                    else -> "only ${fixCount()} fixes, which is not enough to trust"
+                }
+            )
+        }
+        return Nav(
+            sogKn = sogKnots(),
+            cogDeg = cogDeg(),
+            source = NavSource.GPS,
+            fixes = fixCount(),
+            steady = steady(),
+            detail = "GPS: ${fixCount()} fixes"
+        )
+    }
+
+    /** Live, for the UI: what would we get if we stopped the record right now? */
+    fun liveNav(): Nav = nav()
+
     fun summary(): String = when {
         !available || fixCount() == 0 -> "no GPS fix"
         cogSin.isEmpty() -> "SOG ${"%.1f".format(sogKnots())} kn (stopped / no course)"
