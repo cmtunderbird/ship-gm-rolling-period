@@ -61,9 +61,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     val sensorSource: RollRecorder.Source get() = recorder.availableSource()
 
-    /** Target record length: a free decay needs ~10 cycles; a seaway record needs many more. */
+    /**
+     * Target record length.
+     *
+     * 180 s was too short and the first real ship proved it: at a 16 s roll that is only 12
+     * cycles, and a 12-cycle record cannot resolve the period better than +/- 2.7 s - which is
+     * +/- 34% on GM. You need ~25 cycles. For a slow ship that means eight minutes, not three.
+     */
     val recommendedSeconds: Double
-        get() = if (mode == PeriodEstimator.Mode.FREE_DECAY) 180.0 else 1200.0
+        get() = if (mode == PeriodEstimator.Mode.FREE_DECAY) 480.0 else 1800.0
 
     fun updateProfile(block: ShipProfile.() -> Unit) {
         val p = profile.copy(calibrations = profile.calibrations.toMutableList())
@@ -100,7 +106,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // The heave signal is what lets the estimator ask the sea whether the roll peak is even
         // the ship's. Without it, SEAWAY mode is flying blind.
         val heave = recorder.buildHeaveSeries()
-        val r = PeriodEstimator.estimate(s.phi, s.fs, mode, s.axisDominance, heave)
+        val r = PeriodEstimator.estimate(s.phi, s.fs, mode, s.axisDominance, heave, gps.sogKnots())
         result = r
 
         // Log the record so a second one, on a different heading, can be compared against it.
@@ -170,6 +176,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return best?.let { SeaAnalyzer.encounterCheck(it.first, it.second) }
     }
 
+    /** The last period she actually gave us, for the forecast warnings. NaN if none yet. */
+    fun lastMeasuredPeriod(): Double =
+        result?.period?.takeIf { !it.isNaN() } ?: Double.NaN
+
     fun clearHistory() {
         history.clear()
         encounter = null
@@ -180,7 +190,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val r = result ?: return
         val g = gm ?: return
         lastFiles = Exporter.export(
-            getApplication(), profile, s, r, g, mode, recorder.rawSamples(), note
+            getApplication(), profile, s, r, g, mode,
+            recorder.rawSamples(), recorder.rawHeave(),
+            gps.sogKnots(), gps.cogDeg(), note
         )
     }
 

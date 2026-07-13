@@ -66,6 +66,42 @@ class SeaAnalyzerTest {
 
     private fun psd(x: DoubleArray) = Dsp.welchPsd(Dsp.detrend(x), fs, 4096)
 
+    /**
+     * A REAL sea, for the heave channel.
+     *
+     * My first version of this test used narrowBand() - a 1-DOF oscillator - as the "sea". That
+     * is a bad model of a sea, and the m/v Androklis data showed why: an oscillator driven by
+     * white noise has a FLAT ENERGY SHELF at every period longer than its peak. A real wave
+     * spectrum has almost nothing below its peak (JONSWAP dies as exp(-1.25 (fp/f)^4)) - which
+     * is the very property the wind-sea hole in this project depends on.
+     *
+     * So the fake sea was putting energy at 15 s where a real sea puts none, and the detector
+     * was right to see it. Band-limited noise, with a proper cut-off, is the honest model.
+     */
+    private fun realSea(tPeak: Double, n: Int, amp: Double): DoubleArray {
+        val x = DoubleArray(n) { gauss() }
+        val nf = Dsp.nextPow2(n)
+        val re = DoubleArray(nf); val im = DoubleArray(nf)
+        System.arraycopy(x, 0, re, 0, n)
+        Dsp.fft(re, im, false)
+        val df = fs / nf
+        val fp = 1.0 / tPeak
+        for (k in 0..nf / 2) {
+            val fr = k * df
+            // a real sea: sharp cut-off below the peak, gentle tail above it
+            val g = if (fr <= 0.0) 0.0
+            else if (fr < fp) kotlin.math.exp(-1.25 * Math.pow(fp / fr, 4.0))
+            else Math.pow(fp / fr, 2.5)
+            re[k] *= g; im[k] *= g
+            val m = (nf - k) % nf
+            re[m] *= g; im[m] *= g
+        }
+        Dsp.fft(re, im, true)
+        val out = DoubleArray(n) { re[it] }
+        val sd = Dsp.std(out).coerceAtLeast(1e-9)
+        return DoubleArray(n) { out[it] / sd * amp }
+    }
+
     // ------------------------------------------------------------------------------------
     // THE HOLE THIS EXISTS TO PLUG
     // ------------------------------------------------------------------------------------
@@ -86,7 +122,7 @@ class SeaAnalyzerTest {
         val n = (1800 * fs).toInt()
 
         // both roll and heave are driven by the same 8 s sea: the roll peak has a TWIN
-        val sea = narrowBand(8.0, n, 1.0)
+        val sea = realSea(8.0, n, 1.0)
         val roll = DoubleArray(n) { 2.0 * sea[it] + 0.02 * gauss() }
         val heave = DoubleArray(n) { 3.0 * sea[it] + 0.02 * gauss() }
 
@@ -97,7 +133,7 @@ class SeaAnalyzerTest {
         assertTrue("the record must be REJECTED", !r.ok)
         assertTrue(
             "the message must say why: ${r.message}",
-            r.message.contains("also appears in the accelerometer")
+            r.message.contains("There is real wave energy")
         )
     }
 
@@ -110,7 +146,7 @@ class SeaAnalyzerTest {
     fun `a genuine roll resonance is NOT flagged as sea`() {
         val n = (1800 * fs).toInt()
         val resonance = narrowBand(15.0, n, 3.0, zeta = 0.05)   // the ship
-        val waves = narrowBand(8.0, n, 1.0)                     // the sea
+        val waves = realSea(8.0, n, 1.0)                        // the sea, properly shaped
 
         val roll = DoubleArray(n) { resonance[it] + 0.4 * waves[it] + 0.02 * gauss() }
         val heave = DoubleArray(n) { 3.0 * waves[it] + 0.02 * gauss() }   // NO 15 s content
@@ -128,7 +164,7 @@ class SeaAnalyzerTest {
     @Test
     fun `the sea's own dominant period is reported`() {
         val n = (1800 * fs).toInt()
-        val heave = narrowBand(11.0, n, 1.0)
+        val heave = realSea(11.0, n, 1.0)
         val roll = narrowBand(17.0, n, 2.0)
         val sea = SeaAnalyzer.analyse(psd(roll), psd(heave), 1.0 / 17.0, 1.0 / 45.0, 1.0 / 3.0)
         assertNotNull(sea)
@@ -166,18 +202,19 @@ class SeaAnalyzerTest {
 
     @Test
     fun `encounter period shifts with heading, exactly as the dispersion relation says`() {
+        // The argument is the bearing the seas come FROM, relative to the bow.
         val t0 = 12.0
         val u = 6.0                                            // m/s, about 12 knots
-        val head = SeaAnalyzer.encounterPeriod(t0, u, 0.0)     // steaming into them
-        val beam = SeaAnalyzer.encounterPeriod(t0, u, 90.0)    // waves on the beam
-        val follow = SeaAnalyzer.encounterPeriod(t0, u, 180.0) // running with them
+        val head = SeaAnalyzer.encounterPeriod(t0, u, 0.0)     // seas from dead ahead
+        val beam = SeaAnalyzer.encounterPeriod(t0, u, 90.0)    // seas on the beam
+        val follow = SeaAnalyzer.encounterPeriod(t0, u, 180.0) // seas from astern
 
         assertEquals("on the beam, encounter = true period", t0, beam, 1e-6)
-        assertTrue("meeting waves shortens the encounter period", head < t0)
-        assertTrue("running with them lengthens it", follow > t0)
+        assertTrue("steaming INTO the seas shortens the encounter period", head < t0)
+        assertTrue("running WITH them lengthens it", follow > t0)
 
         val w0 = 2 * PI / t0
-        assertEquals(2 * PI / (w0 - w0 * w0 / 9.80665 * u), head, 1e-6)
+        assertEquals(2 * PI / (w0 + w0 * w0 / 9.80665 * u), head, 1e-6)
     }
 
     @Test

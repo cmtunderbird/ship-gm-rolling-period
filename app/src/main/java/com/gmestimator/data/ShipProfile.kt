@@ -1,6 +1,7 @@
 package com.gmestimator.data
 
 import android.content.Context
+import com.gmestimator.core.ForecastAdvisor
 import com.gmestimator.core.GmModel
 import org.json.JSONArray
 import org.json.JSONObject
@@ -24,8 +25,22 @@ data class ShipProfile(
     var minRequiredGm: Double = 0.0,    // from the stability booklet; 0 = not set
     var fSource: GmModel.FSource = GmModel.FSource.IS_CODE,
     var manualF: Double = 0.80,
+    // The Master's forecast. Used ONLY to label peaks, warn about resonance and advise a
+    // measurement window. It NEVER touches GM - see ForecastAdvisor.
+    var seaHs: Double = 0.0, var seaTp: Double = 0.0, var seaFrom: Double = 0.0,
+    var swellHs: Double = 0.0, var swellTp: Double = 0.0, var swellFrom: Double = 0.0,
     var calibrations: MutableList<CalPoint> = mutableListOf()
 ) {
+
+    fun waveSystems(): List<ForecastAdvisor.WaveSystem> = listOf(
+        ForecastAdvisor.WaveSystem("Sea", seaHs, seaTp, seaFrom),
+        ForecastAdvisor.WaveSystem("Swell", swellHs, swellTp, swellFrom)
+    ).filter { it.isSet() }
+
+    /** Her expected roll period from the booklet GM. FOR WARNINGS ONLY - never for the estimate. */
+    fun expectedPeriod(): Double =
+        if (minRequiredGm > 0 && beam > 0) GmModel.periodFromGm(minRequiredGm, effectiveF(), beam)
+        else Double.NaN
 
     /** The roll coefficient actually used, given the selected source. */
     fun effectiveF(): Double = when (fSource) {
@@ -60,6 +75,8 @@ data class ShipProfile(
         put("minRequiredGm", minRequiredGm)
         put("fSource", fSource.name)
         put("manualF", manualF)
+        put("seaHs", seaHs); put("seaTp", seaTp); put("seaFrom", seaFrom)
+        put("swellHs", swellHs); put("swellTp", swellTp); put("swellFrom", swellFrom)
         put("calibrations", JSONArray().apply {
             calibrations.forEach { c ->
                 put(JSONObject().apply {
@@ -101,6 +118,12 @@ data class ShipProfile(
                     GmModel.FSource.valueOf(o.optString("fSource", "IS_CODE"))
                 }.getOrDefault(GmModel.FSource.IS_CODE),
                 manualF = o.optDouble("manualF", 0.80),
+                seaHs = o.optDouble("seaHs", 0.0),
+                seaTp = o.optDouble("seaTp", 0.0),
+                seaFrom = o.optDouble("seaFrom", 0.0),
+                swellHs = o.optDouble("swellHs", 0.0),
+                swellTp = o.optDouble("swellTp", 0.0),
+                swellFrom = o.optDouble("swellFrom", 0.0),
                 calibrations = cals
             )
         }

@@ -18,6 +18,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.gmestimator.core.ForecastAdvisor
 import com.gmestimator.core.GmModel
 import com.gmestimator.core.PeriodEstimator
 import com.gmestimator.core.RollRecorder
@@ -33,7 +34,7 @@ private val Bad = Color(0xFFC62828)
 @Composable
 fun GmApp(vm: MainViewModel) {
     var tab by remember { mutableStateOf(0) }
-    val titles = listOf("Ship", "Measure", "Result", "Calibrate")
+    val titles = listOf("Ship", "Sea", "Measure", "Result", "Calibrate")
 
     Scaffold(
         topBar = {
@@ -50,8 +51,9 @@ fun GmApp(vm: MainViewModel) {
         Box(Modifier.padding(pad)) {
             when (tab) {
                 0 -> ShipScreen(vm)
-                1 -> MeasureScreen(vm) { tab = 2 }
-                2 -> ResultScreen(vm)
+                1 -> SeaScreen(vm)
+                2 -> MeasureScreen(vm) { tab = 3 }
+                3 -> ResultScreen(vm)
                 else -> CalibrateScreen(vm)
             }
         }
@@ -134,6 +136,177 @@ private fun ShipScreen(vm: MainViewModel) {
             }
         } else {
             Text("Enter B, d and Lwl to continue.", color = Warn)
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------------------- Sea
+
+/**
+ * The Master's forecast. THIS NEVER TOUCHES GM.
+ *
+ * I measured what happens when a forecast IS allowed into the GM calculation: 47% of answers
+ * catastrophically wrong at realistic forecast quality (docs/FORECAST_ASSISTED.md). So the
+ * forecast is used for exactly four things, none of which produce a number:
+ * label the peaks, warn about resonance, advise a measurement window, flag ill-conditioning.
+ */
+@Composable
+private fun SeaScreen(vm: MainViewModel) {
+    val p = vm.profile
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text("The forecast", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Sea and swell, as your weather forecast gives them. Direction is the bearing the " +
+                "waves come FROM, true.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Card(
+            Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Warn.copy(alpha = 0.10f))
+        ) {
+            Column(Modifier.padding(12.dp)) {
+                Text("This never touches GM", fontWeight = FontWeight.Bold)
+                Text(
+                    "GM is computed from the measured roll period and nothing else. I tested " +
+                        "letting a forecast into the calculation: at realistic forecast accuracy " +
+                        "it produced catastrophically wrong GM almost half the time. So the " +
+                        "forecast is used only to LABEL the peaks, WARN about resonance, and " +
+                        "ADVISE when to measure.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+
+        Text("Wind sea", fontWeight = FontWeight.Bold)
+        NumField("Hs [m]", p.seaHs) { v -> vm.updateProfile { seaHs = v } }
+        NumField("Period Tp [s]", p.seaTp) { v -> vm.updateProfile { seaTp = v } }
+        NumField("From [° true]", p.seaFrom) { v -> vm.updateProfile { seaFrom = v } }
+
+        HorizontalDivider()
+        Text("Swell", fontWeight = FontWeight.Bold)
+        NumField("Hs [m]", p.swellHs) { v -> vm.updateProfile { swellHs = v } }
+        NumField("Period Tp [s]", p.swellTp) { v -> vm.updateProfile { swellTp = v } }
+        NumField("From [° true]", p.swellFrom) { v -> vm.updateProfile { swellFrom = v } }
+
+        HorizontalDivider()
+
+        val systems = p.waveSystems()
+        val cog = vm.gps.cogDeg()
+        val sog = vm.gps.sogKnots()
+        val tn = vm.lastMeasuredPeriod().let { if (it.isNaN()) p.expectedPeriod() else it }
+
+        if (systems.isEmpty()) {
+            Text("Enter the forecast above and this fills in.", color = Warn)
+            return@Column
+        }
+        if (cog.isNaN()) {
+            Text(
+                "No GPS course yet — the encounter periods need to know which way you are " +
+                    "pointing and how fast. Start a recording, or wait for a fix.",
+                color = Warn, style = MaterialTheme.typography.bodySmall
+            )
+            return@Column
+        }
+
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("How the sea meets you now", fontWeight = FontWeight.Bold)
+                Mono("COG ${"%.0f".format(cog)}°   SOG ${"%.1f".format(sog)} kn")
+                Spacer(Modifier.height(4.dp))
+                systems.forEach { sys ->
+                    val e = ForecastAdvisor.encounter(sys, cog, sog)
+                    val rel = when {
+                        e.relBearingDeg < 30 -> "head"
+                        e.relBearingDeg < 60 -> "bow"
+                        e.relBearingDeg < 120 -> "BEAM"
+                        e.relBearingDeg < 150 -> "quarter"
+                        else -> "following"
+                    }
+                    Mono(
+                        "${sys.label.padEnd(6)} ${"%.1f".format(sys.tpS)} s true  →  " +
+                            "${"%.1f".format(e.encounterPeriodS)} s encounter   " +
+                            "(${"%.0f".format(e.relBearingDeg)}° $rel)"
+                    )
+                }
+                if (!tn.isNaN()) {
+                    Spacer(Modifier.height(4.dp))
+                    Mono("her roll period ≈ ${"%.1f".format(tn)} s")
+                }
+            }
+        }
+
+        val warns = ForecastAdvisor.warnings(tn, systems, cog, sog)
+        warns.forEach { w ->
+            Card(
+                Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = (if (w.severe) Bad else Warn).copy(alpha = 0.12f)
+                )
+            ) {
+                Text(
+                    w.text,
+                    Modifier.padding(12.dp),
+                    color = if (w.severe) Bad else Warn,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+        if (warns.isEmpty() && !tn.isNaN()) {
+            Text("No resonance risk on this heading.", color = Good)
+        }
+
+        HorizontalDivider()
+        Text("When to measure", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "A free-decay test needs the sea to leave her alone. These are the headings and " +
+                "speeds where the forecast says she will be rolled LEAST — so what you record " +
+                "is her own ring-down, not the weather.",
+            style = MaterialTheme.typography.bodySmall
+        )
+        val wins = ForecastAdvisor.bestWindows(
+            tn, systems,
+            listOf(0.0, (sog * 0.5), sog, sog + 3.0).filter { it >= 0 && it < 25 }.distinct()
+        )
+        if (wins.isEmpty()) {
+            Text("Need her roll period first — measure once, or set the booklet GM.", color = Warn)
+        } else {
+            wins.forEachIndexed { i, w ->
+                Card(
+                    Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (i == 0) Good.copy(alpha = 0.10f)
+                        else MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text(
+                            "Come to ${"%.0f".format(w.cogDeg)}°  at ${"%.0f".format(w.sogKn)} kn",
+                            fontWeight = if (i == 0) FontWeight.Bold else FontWeight.Normal
+                        )
+                        Mono("predicted wave-driven roll: ${"%.2f".format(w.rollScore)}  (lower is calmer)")
+                    }
+                }
+            }
+            Card(
+                Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Bad.copy(alpha = 0.08f))
+            ) {
+                Text(
+                    "This is advice about a MEASUREMENT, not about navigation. It deliberately " +
+                        "does not look for the heading that makes her roll hardest — that would " +
+                        "mean steering into synchronous rolling to improve a reading, and no " +
+                        "reading is worth that. The Master decides where the ship goes.",
+                    Modifier.padding(12.dp),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
         }
     }
 }
@@ -478,6 +651,26 @@ private fun SeaCard(vm: MainViewModel, r: PeriodEstimator.Result) {
                             "left to roll FREELY does she roll at her own. Do a free-decay test in " +
                             "sheltered water.",
                         style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+
+            // Does the forecast recognise this peak? If a forecast wave meets her at the same
+            // period the roll peaked at, that peak is the sea. If no forecast wave lands
+            // anywhere near it, that is real evidence it is the ship.
+            val label = ForecastAdvisor.labelPeak(
+                r.period, vm.profile.waveSystems(), vm.gps.cogDeg(), vm.gps.sogKnots()
+            )
+            if (vm.profile.waveSystems().isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                if (label != null) {
+                    Text("FORECAST: $label", color = Bad, fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.bodySmall)
+                } else {
+                    Text(
+                        "FORECAST: no sea or swell in the forecast meets you anywhere near " +
+                            "${"%.1f".format(r.period)} s. That is evidence this peak is the ship.",
+                        color = Good, style = MaterialTheme.typography.bodySmall
                     )
                 }
             }

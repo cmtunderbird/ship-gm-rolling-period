@@ -41,6 +41,9 @@ object Exporter {
         gm: GmModel.GmResult,
         mode: PeriodEstimator.Mode,
         raw: Triple<DoubleArray, DoubleArray, DoubleArray>,
+        heave: Pair<DoubleArray, DoubleArray>,
+        sogKn: Double,
+        cogDeg: Double,
         note: String
     ): List<File> {
         val root = context.getExternalFilesDir(null) ?: context.filesDir
@@ -61,10 +64,21 @@ object Exporter {
             }
         }
 
-        val rep = File(dir, "${base}_report.txt")
-        rep.writeText(buildReport(profile, series, result, gm, mode, note))
+        // The HEAVE channel. It was missing from the first version, which meant that when the
+        // first real record came back with a puzzling sea-lock flag, the one signal needed to
+        // explain it could not be re-examined. Export what you rely on.
+        val hcsv = File(dir, "${base}_heave.csv")
+        hcsv.bufferedWriter().use { w ->
+            w.write("# world-vertical linear acceleration (gravity removed)\n")
+            w.write("t_s,az_ms2\n")
+            val (ht, ha) = heave
+            for (i in ht.indices) w.write("${n(ht[i], 4)},${n(ha[i], 5)}\n")
+        }
 
-        return listOf(rep, csv)
+        val rep = File(dir, "${base}_report.txt")
+        rep.writeText(buildReport(profile, series, result, gm, mode, sogKn, cogDeg, note))
+
+        return listOf(rep, csv, hcsv)
     }
 
     fun buildReport(
@@ -73,8 +87,11 @@ object Exporter {
         r: PeriodEstimator.Result,
         gm: GmModel.GmResult,
         mode: PeriodEstimator.Mode,
+        sogKn: Double,
+        cogDeg: Double,
         note: String
     ): String = buildString {
+        val f0 = { v: Double -> n(v, 0) }
         val f1 = { v: Double -> n(v, 1) }
         val f2 = { v: Double -> n(v, 2) }
         val f3 = { v: Double -> n(v, 3) }
@@ -91,6 +108,19 @@ object Exporter {
         appendLine("  Draught   d   = ${f2(profile.draught)} m  (mean moulded)")
         appendLine("  Length    Lwl = ${f2(profile.lwl)} m")
         appendLine()
+        appendLine("SHIP'S MOTION DURING THE RECORD")
+        // This was missing from the first version. When the Androklis record came back with a
+        // roll floor that never decayed, I could not tell whether it was the sea or the
+        // AUTOPILOT re-exciting her, because the record did not say how fast she was going.
+        // Record the conditions you will later need to explain the result.
+        appendLine("  Speed over ground  ${if (sogKn.isNaN()) "not recorded" else f1(sogKn) + " kn"}")
+        appendLine("  Course over ground ${if (cogDeg.isNaN()) "not recorded" else f0(cogDeg) + " deg"}")
+        if (!sogKn.isNaN() && sogKn > 6.0 && mode == PeriodEstimator.Mode.FREE_DECAY) {
+            appendLine("  WARNING: a free decay at ${f1(sogKn)} kn is not free - autopilot rudder")
+            appendLine("  corrections keep re-exciting her roll, speed adds lift damping, and forward")
+            appendLine("  speed raises GM itself. The booklet GM is a ZERO-SPEED number.")
+        }
+        appendLine()
         appendLine("SENSOR / RECORD")
         appendLine("  Source          : ${series.source}")
         appendLine("  Duration        : ${f1(series.durationSeconds)} s")
@@ -104,6 +134,19 @@ object Exporter {
         appendLine("  Agreement                     ${f1(r.agreement * 100)} %")
         appendLine("  Peak prominence               ${f1(r.prominence)} x median band power")
         appendLine("  Peak repeatability            ${f1(r.consistency * 100)} % of sub-windows")
+        if (!r.periodScatter.isNaN()) {
+            appendLine("  CYCLE-TO-CYCLE SCATTER        ${f1(r.periodScatter * 100)} %   <- the honest quality number")
+            appendLine("     (the spread of her OWN cycles. Two estimators agreeing tells you nothing;")
+            appendLine("      they are both averaging the same data. This is what she actually did.)")
+        }
+        if (!r.resolutionLimit.isNaN()) {
+            appendLine("  Resolution limit of this record +/- ${f2(r.resolutionLimit)} s")
+            appendLine("     (a ${f0(series.durationSeconds)} s record at a ${f1(r.period)} s period is only " +
+                "${f0(series.durationSeconds / r.period)} cycles)")
+        }
+        if (!r.decayContrast.isNaN()) {
+            appendLine("  Decay contrast                ${f1(r.decayContrast)}x  (biggest swing / roll still running at the end)")
+        }
         if (!r.competingPeriod.isNaN()) {
             appendLine("  Competing period            T = ${f2(r.competingPeriod)} s at ${f1(r.competingRatio * 100)} % of primary power")
         }
@@ -112,18 +155,28 @@ object Exporter {
         appendLine("THE SEA  (from the vertical accelerometer)")
         val sea = r.sea
         if (sea == null) {
-            appendLine("  NOT CHECKED - no heave signal. In a seaway the roll peak may simply be the")
-            appendLine("  wave period, and without the accelerometer there is no way to tell.")
+            appendLine("  NOT CHECKED - no heave signal.")
         } else {
             appendLine("  Dominant wave period         ${f2(sea.wavePeakPeriod)} s")
             appendLine("  Vertical acceleration (RMS)  ${f2(sea.rmsVerticalAcc)} m/s2")
-            appendLine("  Indicative Hs                ${f1(sea.indicativeHs)} m   (rough - see docs)")
+            appendLine("  Indicative Hs                ${f1(sea.indicativeHs)} m   (rough)")
+            appendLine("  Phone lever arm from roll axis ${f1(sea.leverArmM)} m  (fitted; its own")
+            appendLine("     roll-induced heave has been removed before the check below)")
             appendLine("  Wave energy at the roll peak ${f1(sea.excessAtRollPeakDb)} dB above background")
-            appendLine(
-                "  SEA-LOCK                     " +
-                    if (sea.seaLocked) "YES - THIS IS A WAVE, NOT THE SHIP"
-                    else "no - the roll peak is the ship's own"
-            )
+            if (mode == PeriodEstimator.Mode.SEAWAY) {
+                appendLine(
+                    "  SEA-LOCK                     " +
+                        if (sea.seaLocked) "YES - THIS IS A WAVE, NOT THE SHIP"
+                        else "no - the roll peak is the ship's own"
+                )
+            } else {
+                // The veto does NOT apply to a free decay: she is ringing down under her own
+                // restoring moment, not being driven. Printing "THIS IS A WAVE" next to an
+                // EXCELLENT-quality GM - as the first shipped version did - is worse than
+                // useless: it teaches the operator to ignore the warning.
+                appendLine("  SEA-LOCK                     not applicable to a free-decay test")
+                appendLine("     (she is ringing down under her own restoring moment, not being driven)")
+            }
         }
         appendLine()
         appendLine("  ADOPTED                     T = ${f2(r.period)} +/- ${f2(r.periodUncertainty)} s")

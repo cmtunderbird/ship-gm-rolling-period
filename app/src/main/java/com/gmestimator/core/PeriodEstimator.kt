@@ -54,6 +54,12 @@ object PeriodEstimator {
         val zeta: Double,               // roll damping ratio (FREE_DECAY only, else NaN)
         val competingPeriod: Double,    // s, second roll period present in the record (NaN if none)
         val competingRatio: Double,     // its power relative to the primary peak
+        /** sd/mean of the individual cycle periods. THE honest quality number - see below. */
+        val periodScatter: Double,
+        /** the spectral resolution limit of a record this short, in seconds of period */
+        val resolutionLimit: Double,
+        /** free decay only: initial roll amplitude / residual wave-driven roll. <3 = swamped. */
+        val decayContrast: Double,
         /** What the sea was doing, from the accelerometer. Null if no heave signal was supplied. */
         val sea: SeaAnalyzer.SeaState?,
         val quality: Quality,
@@ -94,6 +100,7 @@ object PeriodEstimator {
         mode: Mode,
         axisDominance: Double,
         heave: DoubleArray? = null,
+        sogKn: Double = Double.NaN,
         cfg: Config = Config()
     ): Result {
         val fLo = 1.0 / cfg.tMax
@@ -119,16 +126,38 @@ object PeriodEstimator {
         val tCompeting = competing?.let { 1.0 / it.first } ?: Double.NaN
         val rCompeting = competing?.second ?: 0.0
 
-        // ---- 1b. ASK THE SEA -------------------------------------------------------------
+        // ---- 1b. HOW WELL CAN A RECORD THIS SHORT RESOLVE A PERIOD THIS LONG? --------------
+        //
+        // A Hann-windowed record of length D resolves frequencies no better than ~2/D. In
+        // PERIOD terms that is dT = (2/D) * T^2, and it is brutal for a slow ship:
+        //
+        //      190 s record, 16 s roll  ->  only 12 cycles  ->  dT = +/- 2.7 s   (+/- 34% on GM)
+        //
+        // The first real record quoted its spectral peak as "16.20 s" and its uncertainty as
+        // +/- 0.88 s. The honest figure was +/- 2.7 s. Quote a number to 0.01 s that is only
+        // worth +/- 2.7 and you have not measured anything, you have decorated a guess.
+        val resolutionLimit = (2.0 / durSecOf(detr, fs)) * tPsd * tPsd
+
+        // ---- 1c. ASK THE SEA -------------------------------------------------------------
         // Does the roll peak have a twin in the accelerometer? If it does, this is a wave, and
         // nothing about this record says anything about GM. This is the ONLY check that can
         // catch a ship rolling at the wave period in a clean, single-peaked wind sea - the
         // competing-peak gate is blind to it, because there is nothing to compete with.
+        // BEFORE asking the accelerometer about the sea, remove the part of the vertical
+        // acceleration the SHIP'S OWN ROLL put there. The phone is not on the roll axis, so her
+        // roll manufactures a_z at exactly f_n - the one frequency the veto assumes is quiet.
+        // Real ship data found this; simulation never could. See SeaAnalyzer.removeRollInducedHeave.
+        var leverArm = 0.0
         val sea: SeaAnalyzer.SeaState? = heave?.let { h ->
             if (h.size < detr.size / 2) null
             else {
-                val psdAz = Dsp.welchPsd(Dsp.detrend(h), fs, segLen, overlap = 0.5, padFactor = 4)
-                SeaAnalyzer.analyse(psd, psdAz, peak.freq, fLo, fHi)
+                val n = minOf(h.size, detr.size)
+                val (hCorr, lever) = SeaAnalyzer.removeRollInducedHeave(
+                    h.copyOf(n), detr.copyOf(n), fs
+                )
+                leverArm = lever
+                val psdAz = Dsp.welchPsd(Dsp.detrend(hCorr), fs, segLen, overlap = 0.5, padFactor = 4)
+                SeaAnalyzer.analyse(psd, psdAz, peak.freq, fLo, fHi, leverArmM = lever)
             }
         }
 
@@ -186,7 +215,29 @@ object PeriodEstimator {
         }
 
         val uStat = 1.0 / sqrt(1.0 / (seZc * seZc).coerceAtLeast(1e-9) + 1.0 / (sePsd * sePsd).coerceAtLeast(1e-9))
-        val uPeriod = maxOf(uStat, 0.5 * abs(tPsd - tZc))
+
+        // THE UNCERTAINTY MUST NOT BE SMALLER THAN WHAT THE RECORD CAN PHYSICALLY RESOLVE.
+        // uStat shrinks like 1/sqrt(n) and will happily go to zero; the resolution limit does
+        // not. Take the worst of the three.
+        val uPeriod = maxOf(maxOf(uStat, 0.5 * abs(tPsd - tZc)), resolutionLimit)
+
+        // Scatter of the INDIVIDUAL cycles. This is the honest quality signal.
+        val scatter = if (cycles.nCycles > 2 && cycles.meanPeriod > 0)
+            cycles.sdPeriod / cycles.meanPeriod else Double.NaN
+
+        // Free decay: did she actually ring DOWN, or is the "decay" swamped by wave-driven roll
+        // that never stops? Contrast = biggest early swing / residual roll at the end.
+        var contrast = Double.NaN
+        if (mode == Mode.FREE_DECAY && core.size > 100) {
+            val nEarly = core.size / 5
+            val nLate = core.size / 3
+            var early = 0.0
+            for (i in 0 until nEarly) early = maxOf(early, abs(core[i]))
+            var late2 = 0.0
+            for (i in core.size - nLate until core.size) late2 += core[i] * core[i]
+            val lateRms = sqrt(late2 / nLate)
+            contrast = if (lateRms > 1e-6) early / lateRms else Double.MAX_VALUE
+        }
 
         val meanAmp = if (cycles.amplitudes.isEmpty()) 0.0 else Dsp.mean(cycles.amplitudes)
         val maxAmp = cycles.amplitudes.maxOrNull() ?: 0.0
@@ -225,11 +276,61 @@ object PeriodEstimator {
         if (axisDominance < cfg.minAxisDominance) problems.add("roll axis is poorly defined (pitch/yaw contamination)")
         if (mode == Mode.SEAWAY && consistency < 0.5) problems.add("peak period is not repeatable across the record")
 
+        // THE CYCLE SCATTER GATE.
+        //
+        // The first real record reported "methods agree to 1.7% - EXCELLENT" while its individual
+        // cycles ran 10.2, 16.5, 10.3, 18.7, 19.0 s - a +/-20% scatter that never reached the
+        // user. Of course the two methods agreed: the PSD peak and the zero-crossing MEDIAN are
+        // both central-tendency estimators OF THE SAME SCATTERED DATA. Agreement between two
+        // estimators of the same thing is not evidence about the thing.
+        //
+        // What the ship is actually telling us is in the spread of her own cycles.
+        if (!scatter.isNaN() && scatter > 0.25) {
+            problems.add(
+                "the individual roll cycles scatter by ${fmt(scatter * 100)}% (" +
+                    "${fmt(cycles.medianPeriod)} s median, sd ${fmt(cycles.sdPeriod)} s). She is not " +
+                    "rolling at one clean period, so there is no single period to report"
+            )
+        }
+        // SPEED. A "free" decay taken at speed is not free.
+        //
+        //   - every rudder movement rolls her, and under autopilot she is correcting
+        //     continuously, so she is being RE-EXCITED several times a minute;
+        //   - roll damping rises with speed (Ikeda's lift component), so she rings down faster
+        //     and you get fewer usable cycles;
+        //   - the steady wave pattern, sinkage and trim at speed raise the waterplane area aft,
+        //     which raises BM and hence GM - so the period you measure at 14 kn is NOT the
+        //     period she would have at rest, and the loading computer's GM is a zero-speed
+        //     hydrostatic number (Grin, IMDC 2024);
+        //   - and GPS gives speed over GROUND, while the encounter relation wants speed through
+        //     the WATER.
+        //
+        // Slowing down kills all four at once. It is the same conclusion the century-old roll
+        // test reached: calm water, let her roll.
+        if (mode == Mode.FREE_DECAY && !sogKn.isNaN() && sogKn > 6.0) {
+            problems.add(
+                "she was making ${fmt(sogKn)} kn. A free decay at speed is not free: the autopilot " +
+                    "re-excites her roll at every rudder correction, speed adds lift damping, and " +
+                    "forward speed changes GM itself. Slow to under 3 kn, or stop"
+            )
+        }
+        if (mode == Mode.FREE_DECAY && !contrast.isNaN() && contrast < 3.0) {
+            problems.add(
+                "the decay is swamped: her biggest swing is only ${fmt(contrast)}x the roll still " +
+                    "running at the end of the record. This was not calm water. Roll her harder, or " +
+                    "do it somewhere more sheltered"
+            )
+        }
+
+        // Quality is now driven by the CYCLE SCATTER, not by the agreement between two
+        // estimators of the same central tendency. Agreement is still shown, but it is a
+        // consistency check on the arithmetic, not evidence about the ship.
+        val sc = if (scatter.isNaN()) 1.0 else scatter
         val quality = when {
             problems.isNotEmpty() -> Quality.POOR
-            agreement < 0.03 -> Quality.EXCELLENT
-            agreement < 0.05 -> Quality.GOOD
-            agreement < 0.10 -> Quality.FAIR
+            sc < 0.08 && agreement < 0.05 -> Quality.EXCELLENT
+            sc < 0.15 && agreement < 0.10 -> Quality.GOOD
+            sc < 0.25 -> Quality.FAIR
             else -> Quality.POOR
         }
 
@@ -256,6 +357,9 @@ object PeriodEstimator {
             zeta = zeta,
             competingPeriod = tCompeting,
             competingRatio = rCompeting,
+            periodScatter = scatter,
+            resolutionLimit = resolutionLimit,
+            decayContrast = contrast,
             sea = sea,
             quality = quality,
             phi = core,
@@ -299,9 +403,13 @@ object PeriodEstimator {
         periodSpectral = Double.NaN, periodZeroCross = Double.NaN, agreement = Double.NaN,
         nCycles = 0, meanAmplitude = 0.0, maxAmplitude = 0.0, prominence = 0.0,
         axisDominance = 0.0, consistency = 0.0, zeta = Double.NaN,
-        competingPeriod = Double.NaN, competingRatio = 0.0, sea = null, quality = Quality.POOR,
+        competingPeriod = Double.NaN, competingRatio = 0.0,
+        periodScatter = Double.NaN, resolutionLimit = Double.NaN, decayContrast = Double.NaN,
+        sea = null, quality = Quality.POOR,
         phi = DoubleArray(0), fs = fs, psdFreq = DoubleArray(0), psdPower = DoubleArray(0)
     )
+
+    private fun durSecOf(x: DoubleArray, fs: Double) = x.size / fs
 
     private fun fmt(v: Double) = String.format(java.util.Locale.US, "%.1f", v)
 }
