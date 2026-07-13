@@ -53,13 +53,25 @@ object Exporter {
 
         val csv = File(dir, "${base}_raw.csv")
         csv.bufferedWriter().use { w ->
+            // THE HEADER MUST DESCRIBE THE ROWS BENEATH IT.
+            //
+            // It used to say `fs_resampled_hz,25.0` - the rate the ANALYSIS runs at - directly
+            // above raw sensor rows arriving at about 50 Hz. Anyone re-analysing this file
+            // offline reads the header, assumes 25 Hz, and gets EVERY PERIOD WRONG BY A FACTOR
+            // OF TWO. It cost me ten minutes and very nearly a false bug report against my own
+            // sea-lock: at the wrong rate, the ship's roll and the sea land on top of each other.
+            //
+            // State the rate of the rows that are actually here, measured from the timestamps.
+            val (t, x, y) = raw
+            val rawFs = if (t.size > 2 && t.last() > t.first())
+                (t.size - 1) / (t.last() - t.first()) else Double.NaN
             w.write("# GM Estimator raw record\n")
             w.write("# sensor_source,${series.source}\n")
-            w.write("# fs_resampled_hz,${n(series.fs, 1)}\n")
-            w.write("# roll_axis_heading_deg,${n(series.headingOffsetDeg, 1)}\n")
+            w.write("# sample_rate_hz_of_THIS_file,${n(rawFs, 2)}\n")
+            w.write("# (the analysis resamples to ${n(series.fs, 1)} Hz; these rows are NOT resampled)\n")
+            w.write("# roll_axis,${axisNote(series.headingOffsetDeg)}\n")
             w.write("# axis_dominance,${n(series.axisDominance, 3)}\n")
             w.write("t_s,tilt_x_deg,tilt_y_deg\n")
-            val (t, x, y) = raw
             for (i in t.indices) {
                 w.write("${n(t[i], 4)},${n(x[i], 5)},${n(y[i], 5)}\n")
             }
@@ -80,6 +92,14 @@ object Exporter {
         rep.writeText(buildReport(profile, series, result, gm, mode, nav, note))
 
         return listOf(rep, csv, hcsv)
+    }
+
+    /** Which of the phone's own axes was taken as the roll axis. "0.0 deg from +Y" was ambiguous. */
+    private fun axisNote(headingDeg: Double): String = when {
+        headingDeg.isNaN() -> "unknown"
+        kotlin.math.abs(headingDeg) < 1.0 -> "tilt_x  (phone's long edge fore-and-aft; tilt_y is then PITCH)"
+        kotlin.math.abs(headingDeg - 90.0) < 1.0 -> "tilt_y  (phone's long edge athwartships; tilt_x is then PITCH)"
+        else -> "${n(headingDeg, 1)} deg from phone +X (found by PCA)"
     }
 
     fun buildReport(
@@ -146,7 +166,7 @@ object Exporter {
         appendLine("  Source          : ${series.source}")
         appendLine("  Duration        : ${f1(series.durationSeconds)} s")
         appendLine("  Resample rate   : ${f1(series.fs)} Hz")
-        appendLine("  Roll-axis offset: ${f1(series.headingOffsetDeg)} deg from phone +Y")
+        appendLine("  Roll axis       : ${axisNote(series.headingOffsetDeg)}")
         appendLine("  Axis dominance  : ${f3(series.axisDominance)}  (1.0 = pure single-axis motion)")
         appendLine()
         appendLine("ROLL PERIOD")

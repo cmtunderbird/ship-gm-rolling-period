@@ -527,14 +527,62 @@ private fun ResultScreen(vm: MainViewModel) {
             }
         }
 
-        if (g != null) {
+        // ------------------------------------------------------------------------------------
+        // A REJECTED RECORD MUST NOT SHOW A NUMBER.
+        //
+        // The 13 July record was POOR - she was making 17.4 kn, rolling less than a degree, and
+        // her cycles scattered by 39%. The app said "Unreliable" in small grey type and then
+        // printed GM = 1.31 m in forty-point bold. The Master read the forty-point bold, as any
+        // human being would, and called it "an acceptable value".
+        //
+        // That is not his mistake. It is mine. A number displayed like an answer IS an answer,
+        // whatever caveat is printed beside it. If the instrument has rejected the record, the
+        // instrument must not put a GM on the screen - it must say what went wrong and what to
+        // do about it. The number is still available, but you have to ask for it, knowingly.
+        // ------------------------------------------------------------------------------------
+        var showRejected by remember(r) { mutableStateOf(false) }
+        val rejected = !r.ok
+
+        if (rejected) {
+            Card(
+                Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Bad.copy(alpha = 0.12f))
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("NO USABLE MEASUREMENT", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Bad)
+                    Text(r.message, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "She was not rolling in a way that can be turned into a GM. This is not a " +
+                            "sensor fault and not a bug - it is the ship telling you that the " +
+                            "conditions were wrong for the measurement.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (!showRejected && g != null) {
+                        TextButton(onClick = { showRejected = true }) {
+                            Text("Show the number anyway — knowing it is not a measurement")
+                        }
+                    }
+                }
+            }
+        }
+
+        if (g != null && (!rejected || showRejected)) {
             Card(
                 Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = qColor.copy(alpha = 0.10f))
             ) {
                 Column(Modifier.padding(16.dp)) {
-                    Text("GM", style = MaterialTheme.typography.labelLarge)
-                    Text("${"%.2f".format(g.gm)} m", fontSize = 40.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        if (rejected) "GM — REJECTED RECORD, NOT A MEASUREMENT" else "GM",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (rejected) Bad else MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        "${"%.2f".format(g.gm)} m",
+                        fontSize = if (rejected) 24.sp else 40.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (rejected) Bad else MaterialTheme.colorScheme.onSurface
+                    )
                     Text(
                         "1σ range  ${"%.2f".format(g.gmLow)} – ${"%.2f".format(g.gmHigh)} m " +
                             "(±${"%.0f".format(g.relUncertainty * 100)} %)",
