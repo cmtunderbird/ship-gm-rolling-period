@@ -1,0 +1,67 @@
+name: release-apk
+
+# Builds a signed debug APK and attaches it to a GitHub Release, so it can be downloaded
+# straight onto a phone without a GitHub login (Actions artifacts require one; releases do not).
+#
+#   git tag v0.1 && git push origin v0.1
+#
+# or run it by hand from the Actions tab.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v3
+
+      # The acceptance tests must pass before anything is released. They include the
+      # swell-rejection case and the sea-lock veto - a build that fails them must never end up
+      # on a bridge.
+      - name: Run the acceptance tests
+        run: gradle :app:testDebugUnitTest --no-daemon
+
+      - name: Build the APK
+        run: gradle :app:assembleDebug --no-daemon
+
+      - name: Name it
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk out/GmEstimator-${GITHUB_REF_NAME:-dev}.apk
+          ls -la out/
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name != 'main' && github.ref_name || 'latest' }}
+          name: GM Estimator ${{ github.ref_name }}
+          files: out/*.apk
+          generate_release_notes: true
+          body: |
+            **Debug build.** Signed with the Android debug key, so Android will call it an
+            unknown app - that is expected for a sideloaded APK.
+
+            Install on Android (HyperOS / MIUI):
+            1. Download the APK below on the phone.
+            2. Open it. Allow "install unknown apps" for your browser/file manager when asked.
+            3. Settings -> Apps -> GM Estimator -> Battery -> **No restrictions**.
+               HyperOS will otherwise throttle the sensors mid-record.
+            4. Grant Location if you want the encounter test. Everything else works without it.
+
+            Read [docs/SEA_DISCRIMINATION.md](docs/SEA_DISCRIMINATION.md) before trusting a
+            number. In a seaway most records will be REFUSED, on purpose.
+
+            **Not type-approved. Not a substitute for the loading computer.**
