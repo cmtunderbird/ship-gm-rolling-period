@@ -62,6 +62,8 @@ object PeriodEstimator {
         val decayContrast: Double,
         /** Things I could not verify. Not fatal - but never hidden. See the note at `caveats`. */
         val caveats: List<String>,
+        /** Does the raw gyroscope agree with the fused attitude? See AttitudeCheck. */
+        val attitude: AttitudeCheck.Verdict,
         /** Speed and course, and WHERE THEY CAME FROM. Never a bare NaN. */
         val nav: Nav,
         /** What the sea was doing, from the accelerometer. Null if no heave signal was supplied. */
@@ -105,6 +107,9 @@ object PeriodEstimator {
         axisDominance: Double,
         heave: DoubleArray? = null,
         nav: Nav = Nav.UNKNOWN,
+        /** The SAME roll, integrated from the raw gyroscope alone. The one witness the ship's
+         *  own acceleration cannot bribe. See AttitudeCheck. */
+        phiGyro: DoubleArray? = null,
         cfg: Config = Config()
     ): Result {
         val fLo = 1.0 / cfg.tMax
@@ -253,6 +258,25 @@ object PeriodEstimator {
         // should have been able to check - and staying quiet about that is how instruments lie.
         val caveats = ArrayList<String>()
 
+        // ---- 0. IS THE ATTITUDE EVEN REAL? -----------------------------------------------
+        //
+        // Ask the raw gyroscope, which has never touched the accelerometer, whether the ship
+        // actually rotated the way the fused attitude says she did. Anything in the fused
+        // channel that the gyroscope did not see IS NOT ROTATION. This is checked FIRST,
+        // because if the roll signal is an artefact then nothing computed from it means
+        // anything - not the period, not the quality, and certainly not GM.
+        val attitude = AttitudeCheck.compare(detr, phiGyro, fs, cfg.tMin, cfg.tMax)
+        if (attitude.available && !attitude.agree) {
+            problems.add(attitude.message)
+        }
+        if (!attitude.available) {
+            caveats.add(
+                "this device has no gyroscope, so the fused attitude could not be cross-checked. " +
+                    "On a ship the accelerometer sees the hull's sway and surge, not just gravity, " +
+                    "and a fused attitude can drift with it at the very frequencies a ship rolls at"
+            )
+        }
+
         // THE SEA-LOCK VETO. Highest priority: if the accelerometer says this peak is a wave,
         // nothing else matters. In a seaway this is the check that stops the instrument from
         // confidently reporting the wave period as the ship's, which in a plain wind sea makes
@@ -400,6 +424,7 @@ object PeriodEstimator {
             resolutionLimit = resolutionLimit,
             decayContrast = contrast,
             caveats = caveats,
+            attitude = attitude,
             nav = nav,
             sea = sea,
             quality = quality,
@@ -446,7 +471,7 @@ object PeriodEstimator {
         axisDominance = 0.0, consistency = 0.0, zeta = Double.NaN,
         competingPeriod = Double.NaN, competingRatio = 0.0,
         periodScatter = Double.NaN, resolutionLimit = Double.NaN, decayContrast = Double.NaN,
-        caveats = emptyList(), nav = Nav.UNKNOWN,
+        caveats = emptyList(), nav = Nav.UNKNOWN, attitude = AttitudeCheck.NONE,
         sea = null, quality = Quality.POOR,
         phi = DoubleArray(0), fs = fs, psdFreq = DoubleArray(0), psdPower = DoubleArray(0)
     )

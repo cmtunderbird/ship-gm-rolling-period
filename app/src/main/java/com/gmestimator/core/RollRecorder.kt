@@ -155,6 +155,7 @@ class RollRecorder(context: Context) : SensorEventListener {
         // The accelerometer is now registered in EVERY mode, not just the fallbacks. We need it
         // for the heave signal - it is our only witness to what the sea is doing.
         reg(Sensor.TYPE_ACCELEROMETER)
+        reg(Sensor.TYPE_GYROSCOPE)          // ALWAYS - it is the only witness the sea cannot bribe
         recording = true
     }
 
@@ -189,6 +190,7 @@ class RollRecorder(context: Context) : SensorEventListener {
                 val gy = rotMat[7].toDouble()
                 val gz = rotMat[8].toDouble()
                 upX = gx; upY = gy; upZ = gz; haveUp = true
+                if (!haveU0) { u0x = gx; u0y = gy; u0z = gz; haveU0 = true }
                 push(t, tiltFromGravity(gx, gy, gz))
             }
 
@@ -214,6 +216,8 @@ class RollRecorder(context: Context) : SensorEventListener {
                 } else {
                     ux = ax / n; uy = ay / n; uz = az / n
                 }
+                if (!haveU0) { u0x = ax / n; u0y = ay / n; u0z = az / n; haveU0 = true }
+
                 tAz.add(t)
                 azRaw.add(ax * ux + ay * uy + az * uz - GRAVITY)
 
@@ -221,6 +225,15 @@ class RollRecorder(context: Context) : SensorEventListener {
             }
 
             Sensor.TYPE_GYROSCOPE -> {
+                // Record the raw rates in EVERY mode. Previously the gyro was only even
+                // registered in the GYRO_ACCEL fallback, so on this phone - which has a perfectly
+                // good gyroscope and uses GAME_ROTATION_VECTOR - the one sensor that cannot be
+                // fooled by the ship's acceleration was never being read at all.
+                tGyro.add(t)
+                wxRaw.add(e.values[0].toDouble())
+                wyRaw.add(e.values[1].toDouble())
+                wzRaw.add(e.values[2].toDouble())
+
                 if (source != Source.GYRO_ACCEL) return
                 if (lastGyroNanos == 0L) {
                     lastGyroNanos = e.timestamp
@@ -256,6 +269,38 @@ class RollRecorder(context: Context) : SensorEventListener {
         return Pair(tx, ty)
     }
 
+    // ---------------------------------------------------------------- the independent witness
+    //
+    // THE FUSED ATTITUDE IS NOT AN INDEPENDENT WITNESS TO ROLL.
+    //
+    // GAME_ROTATION_VECTOR is a sensor-fusion estimate: the gyroscope gives it the fast motion,
+    // and THE ACCELEROMETER gives it the long-term "which way is down" that stops the gyro from
+    // drifting. On land that is exactly right - the accelerometer really does see gravity.
+    //
+    // On a ship it does not. The accelerometer sees SPECIFIC FORCE: gravity PLUS the ship's own
+    // sway, surge and the lever-arm acceleration of the phone about the roll axis. So the fusion
+    // filter's idea of "down" is dragged around by the ship's motion, and it is dragged around
+    // slowly - which is to say, AT EXACTLY THE FREQUENCIES A SHIP ROLLS AT. Androklis answers at
+    // 17.6 s. That is 0.057 Hz. It is not a safe place to assume a drift-correction loop is quiet.
+    //
+    // We cannot see inside Android's fusion filter, so we cannot argue about it. We can only
+    // MEASURE it. So: integrate the RAW GYROSCOPE, alone, and compare.
+    //
+    // The gyroscope cannot see gravity. It cannot see sway, surge or heave. It measures one thing
+    // - rotation rate - and nothing else. Strapdown-integrate it and you get an attitude that has
+    // never once touched the accelerometer.
+    //
+    //      Anything present in the fused attitude but ABSENT from the gyroscope IS NOT ROTATION.
+    //
+    // That is the whole argument, and it is why this witness is worth having.
+    private val tGyro = ArrayList<Double>()
+    private val wxRaw = ArrayList<Double>()
+    private val wyRaw = ArrayList<Double>()
+    private val wzRaw = ArrayList<Double>()
+
+    private var u0x = 0.0; private var u0y = 0.0; private var u0z = 1.0
+    private var haveU0 = false
+
     private fun push(t: Double, tilt: Pair<Double, Double>) {
         tRaw.add(t); xRaw.add(tilt.first); yRaw.add(tilt.second)
         onSample?.invoke(t, tilt.first, tilt.second)
@@ -264,12 +309,15 @@ class RollRecorder(context: Context) : SensorEventListener {
     // ------------------------------------------------------------------ output
 
     data class RollSeries(
-        val phi: DoubleArray,        // roll angle [deg], uniform at FS
+        val phi: DoubleArray,        // roll angle [deg], uniform at FS - from the FUSED attitude
         val fs: Double,
         val axisDominance: Double,   // 0.5 .. 1.0
         val headingOffsetDeg: Double,// estimated angle between the phone's +Y and the roll axis
         val source: Source,
-        val durationSeconds: Double
+        val durationSeconds: Double,
+        /** The SAME roll angle, on the SAME axis, integrated from the raw gyroscope alone.
+         *  It has never touched the accelerometer. Null if the phone has no gyroscope. */
+        val phiGyro: DoubleArray? = null
     )
 
     /**
@@ -322,15 +370,93 @@ class RollRecorder(context: Context) : SensorEventListener {
 
         val heading = Math.toDegrees(atan2(axY, axX))
 
+        // The same roll, from the gyroscope alone, on the SAME axis - so the two are directly
+        // comparable. If they disagree, the difference is not rotation.
+        val phiGyro = buildGyroRoll(tRaw[0], m, axX, axY, fLo, fHi)
+
         return RollSeries(
             phi = phi,
             fs = FS,
             axisDominance = dominance,
             headingOffsetDeg = heading,
             source = source,
-            durationSeconds = dur
+            durationSeconds = dur,
+            phiGyro = phiGyro
         )
     }
+
+    /**
+     * STRAPDOWN INTEGRATION OF THE RAW GYROSCOPE.
+     *
+     * The "up" direction, expressed in the DEVICE frame, is a world-fixed vector seen from a
+     * rotating body. It therefore obeys
+     *
+     *      du/dt  =  -omega x u
+     *
+     * where omega is the gyro's angular rate in the device frame. Integrate that from a single
+     * starting attitude and you have the device's tilt at every instant, computed from ROTATION
+     * ALONE. The accelerometer is used once, for u(0), and never again - and even that only sets
+     * a constant offset, which the band-pass throws away.
+     *
+     * Integration drift is real but it is a SLOW ramp, far below the 1/45 Hz band edge, and the
+     * band-pass removes it. What survives in the 3-45 s band is honest rotation.
+     */
+    private fun buildGyroRoll(
+        tStart: Double,
+        m: Int,
+        axX: Double,
+        axY: Double,
+        fLo: Double,
+        fHi: Double
+    ): DoubleArray? {
+        val ng = tGyro.size
+        if (ng < 100 || !haveU0) return null
+        if (tGyro[ng - 1] - tGyro[0] < 10.0) return null
+
+        // integrate at the gyro's own rate, then resample to the analysis grid
+        val gx = DoubleArray(ng)
+        val gy = DoubleArray(ng)
+        var ux = u0x; var uy = u0y; var uz = u0z
+        for (i in 0 until ng) {
+            if (i > 0) {
+                val dt = tGyro[i] - tGyro[i - 1]
+                if (dt > 0.0 && dt < 0.5) {
+                    val wx = wxRaw[i]; val wy = wyRaw[i]; val wz = wzRaw[i]
+                    // du = -(omega x u) dt
+                    val cx = wy * uz - wz * uy
+                    val cy = wz * ux - wx * uz
+                    val cz = wx * uy - wy * ux
+                    ux -= cx * dt; uy -= cy * dt; uz -= cz * dt
+                    val nrm = sqrt(ux * ux + uy * uy + uz * uz).coerceAtLeast(1e-9)
+                    ux /= nrm; uy /= nrm; uz /= nrm
+                }
+            }
+            val t = tiltFromGravity(ux, uy, uz)
+            gx[i] = t.first
+            gy[i] = t.second
+        }
+
+        val rx = DoubleArray(m)
+        val ry = DoubleArray(m)
+        var j = 0
+        for (i in 0 until m) {
+            val t = tStart + i / FS
+            while (j < ng - 2 && tGyro[j + 1] < t) j++
+            val t0 = tGyro[j]; val t1 = tGyro[j + 1]
+            val w = if (t1 > t0) ((t - t0) / (t1 - t0)).coerceIn(0.0, 1.0) else 0.0
+            rx[i] = gx[j] + w * (gx[j + 1] - gx[j])
+            ry[i] = gy[j] + w * (gy[j + 1] - gy[j])
+        }
+
+        val bx = Dsp.bandpassFft(rx, FS, fLo, fHi)
+        val by = Dsp.bandpassFft(ry, FS, fLo, fHi)
+        return DoubleArray(m) { bx[it] * axX + by[it] * axY }
+    }
+
+    /** Raw gyro rates, for CSV export / offline re-analysis. */
+    fun rawGyro(): Array<DoubleArray> = arrayOf(
+        tGyro.toDoubleArray(), wxRaw.toDoubleArray(), wyRaw.toDoubleArray(), wzRaw.toDoubleArray()
+    )
 
     /**
      * The heave (world-vertical) acceleration, resampled onto the same uniform grid as the roll.

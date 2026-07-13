@@ -44,6 +44,7 @@ object Exporter {
         mode: PeriodEstimator.Mode,
         raw: Triple<DoubleArray, DoubleArray, DoubleArray>,
         heave: Pair<DoubleArray, DoubleArray>,
+        gyro: Array<DoubleArray>,
         nav: Nav,
         note: String
     ): List<File> {
@@ -89,9 +90,27 @@ object Exporter {
         }
 
         val rep = File(dir, "${base}_report.txt")
+        // THE RAW GYROSCOPE. The only witness aboard that cannot be fooled by the ship's own
+        // acceleration. Exported so the fused attitude can be audited offline, which is exactly
+        // how the fused attitude's honesty gets established or destroyed.
+        val gyroFile = File(dir, "${base}_gyro.csv")
+        if (gyro.size == 4 && gyro[0].isNotEmpty()) {
+            gyroFile.bufferedWriter().use { w ->
+                w.write("# raw gyroscope, device frame, rad/s - NEVER touched by the accelerometer\n")
+                val tg = gyro[0]
+                val fsG = if (tg.size > 2 && tg.last() > tg.first())
+                    (tg.size - 1) / (tg.last() - tg.first()) else Double.NaN
+                w.write("# sample_rate_hz_of_THIS_file,${n(fsG, 2)}\n")
+                w.write("t_s,wx,wy,wz\n")
+                for (i in tg.indices) {
+                    w.write("${n(tg[i], 4)},${n(gyro[1][i], 6)},${n(gyro[2][i], 6)},${n(gyro[3][i], 6)}\n")
+                }
+            }
+        }
+
         rep.writeText(buildReport(profile, series, result, gm, mode, nav, note))
 
-        return listOf(rep, csv, hcsv)
+        return listOfNotNull(rep, csv, hcsv, gyroFile.takeIf { it.exists() })
     }
 
     /** Which of the phone's own axes was taken as the roll axis. "0.0 deg from +Y" was ambiguous. */
@@ -160,6 +179,25 @@ object Exporter {
             appendLine("  WARNING: a free decay at ${f1(nav.sogKn)} kn is not free - autopilot rudder")
             appendLine("  corrections keep re-exciting her roll, speed adds lift damping, and forward")
             appendLine("  speed raises GM itself. The booklet GM is a ZERO-SPEED number.")
+        }
+        appendLine()
+        appendLine("ATTITUDE CROSS-CHECK  (the fused attitude, audited by the raw gyroscope)")
+        val at = r.attitude
+        if (!at.available) {
+            appendLine("  NO GYROSCOPE - the fused attitude could not be checked.")
+        } else {
+            appendLine("  Fused attitude peak    ${f2(at.periodFused)} s")
+            appendLine("  Raw gyroscope peak     ${f2(at.periodGyro)} s")
+            appendLine("  Correlation            ${f2(kotlin.math.abs(at.correlation))}")
+            appendLine("  Amplitude ratio        ${f2(at.amplitudeRatio)}  (gyro / fused)")
+            appendLine("  VERDICT                ${if (at.agree) "AGREE" else "*** DISAGREE ***"}")
+            appendLine("  ${at.message}.")
+            appendLine()
+            appendLine("  Why this matters: GAME_ROTATION_VECTOR is gyro AND accelerometer, blended.")
+            appendLine("  On a ship the accelerometer sees the hull's sway and surge, not just")
+            appendLine("  gravity, so the fusion filter's 'down' is dragged about by the ship at")
+            appendLine("  the very frequencies she rolls at. A gyroscope cannot see gravity. What")
+            appendLine("  the gyroscope does not see IS NOT ROTATION.")
         }
         appendLine()
         appendLine("SENSOR / RECORD")

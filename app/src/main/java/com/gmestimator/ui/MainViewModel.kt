@@ -130,7 +130,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // "zero" when it means "no idea". See Nav.
         val nav = resolveNav()
         this.nav = nav
-        val r = PeriodEstimator.estimate(s.phi, s.fs, mode, s.axisDominance, heave, nav)
+        val r = PeriodEstimator.estimate(
+            s.phi, s.fs, mode, s.axisDominance, heave, nav, s.phiGyro
+        )
         result = r
 
         // Log the record so a second one, on a different heading, can be compared against it.
@@ -246,7 +248,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val g = gm ?: return
         lastFiles = Exporter.export(
             getApplication(), profile, s, r, g, mode,
-            recorder.rawSamples(), recorder.rawHeave(),
+            recorder.rawSamples(), recorder.rawHeave(), recorder.rawGyro(),
             nav ?: resolveNav(), note
         )
     }
